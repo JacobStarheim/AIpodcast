@@ -1,0 +1,9 @@
+import { Pool } from "pg";
+
+export function createPool(databaseUrl: string): Pool {
+  return new Pool({
+    connectionString: databaseUrl,
+    max: 8,
+    idleTimeoutMillis: 30_000
+  });
+}
