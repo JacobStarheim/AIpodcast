@@ -4,6 +4,8 @@ dist/
 .npm-cache/
 .env
 .env.*
+!.env.example
+!**/.env.example
 coverage/
 .nyc_output/
 apps/mobile_flutter/.dart_tool/
