@@ -1,6 +1,6 @@
 import type { Pool } from "pg";
 import { chunkTranscriptSegments } from "./chunking.js";
-import { WorkerOpenAiClient } from "./openai-client.js";
+import type { WorkerAiClient } from "./openai-client.js";
 import { parseRss } from "./rss.js";
 
 interface WorkerServiceOptions {
@@ -29,7 +29,7 @@ interface JobRow {
 export class WorkerService {
   constructor(
     private readonly pool: Pool,
-    private readonly aiClient: WorkerOpenAiClient,
+    private readonly aiClient: WorkerAiClient,
     private readonly options: WorkerServiceOptions
   ) {}
 
@@ -56,11 +56,10 @@ export class WorkerService {
       [job.id]
     );
 
-    if (claimResult.rowCount === 0) {
+    const claimedJob = claimResult.rows[0];
+    if (!claimedJob) {
       return;
     }
-
-    const claimedJob = claimResult.rows[0];
 
     try {
       const sourceRows = claimedJob.source_id
@@ -77,10 +76,21 @@ export class WorkerService {
              ORDER BY created_at ASC`
           );
 
+      if (sourceRows.rows.length === 0) {
+        throw new Error("No active RSS sources found for this ingest job");
+      }
+      const failures: string[] = [];
       for (const source of sourceRows.rows) {
         const maxEpisodesPerSource =
           claimedJob.max_episodes_per_source ?? this.options.defaultMaxEpisodesPerSource;
-        await this.processSource(source, maxEpisodesPerSource);
+        try {
+          await this.processSource(source, maxEpisodesPerSource);
+        } catch (error) {
+          failures.push(`${source.name}: ${error instanceof Error ? error.message : "unknown_error"}`);
+        }
+      }
+      if (failures.length > 0) {
+        throw new Error(failures.join("; "));
       }
 
       await this.pool.query(`UPDATE ingest_jobs SET status = 'completed' WHERE id = $1`, [claimedJob.id]);
@@ -94,7 +104,7 @@ export class WorkerService {
   }
 
   private async processSource(source: SourceRow, maxEpisodesPerSource: number): Promise<void> {
-    const feedResponse = await fetch(source.rss_url);
+    const feedResponse = await fetch(source.rss_url, { signal: AbortSignal.timeout(30_000) });
     if (!feedResponse.ok) {
       throw new Error(`Failed to fetch RSS feed (${source.rss_url}): ${feedResponse.status}`);
     }
@@ -121,7 +131,7 @@ export class WorkerService {
           description = EXCLUDED.description,
           published_at = EXCLUDED.published_at,
           audio_url = EXCLUDED.audio_url,
-          duration_sec = EXCLUDED.duration_sec,
+          duration_sec = COALESCE(EXCLUDED.duration_sec, episodes.duration_sec),
           updated_at = NOW()`,
         [
           source.id,
@@ -139,14 +149,22 @@ export class WorkerService {
       `SELECT id, title, audio_url
        FROM episodes
        WHERE source_id = $1
-         AND transcription_status = 'pending'
+         AND transcription_status IN ('pending', 'failed')
        ORDER BY published_at DESC
        LIMIT $2`,
       [source.id, maxEpisodesPerSource]
     );
 
+    const failures: string[] = [];
     for (const episode of pendingEpisodes.rows) {
-      await this.transcribeEpisode(episode);
+      try {
+        await this.transcribeEpisode(episode);
+      } catch (error) {
+        failures.push(`${episode.title}: ${error instanceof Error ? error.message : "unknown_error"}`);
+      }
+    }
+    if (failures.length > 0) {
+      throw new Error(failures.join("; "));
     }
   }
 
@@ -160,17 +178,35 @@ export class WorkerService {
         mimeType: audio.mimeType
       });
 
-      const chunks = chunkTranscriptSegments(transcription.segments);
+      if (!Number.isFinite(transcription.durationSec) || transcription.durationSec <= 0 ||
+          transcription.segments.some((segment) =>
+            !Number.isFinite(segment.start) || !Number.isFinite(segment.end) ||
+            segment.start < 0 || segment.end <= segment.start ||
+            segment.end > transcription.durationSec + 0.1)) {
+        throw new Error("Transcription returned invalid timestamps");
+      }
+      // Preserve the audio clip citation windows instead of merging them into
+      // long passages. These are coarse clip times, not word-level alignment.
+      const chunks = chunkTranscriptSegments(transcription.segments, { maxDurationSec: 30 });
+      if (chunks.length === 0) {
+        throw new Error("Transcription returned no speech");
+      }
+
+      const embeddedChunks = [];
+      for (const chunk of chunks) {
+        const embedding = await this.aiClient.embedText(chunk.text);
+        if (embedding.length !== 1536 || embedding.some((value) => !Number.isFinite(value))) {
+          throw new Error("Embedding must contain 1536 finite values");
+        }
+        embeddedChunks.push({ chunk, embeddingLiteral: `[${embedding.join(",")}]` });
+      }
 
       const client = await this.pool.connect();
       try {
         await client.query("BEGIN");
         await client.query(`DELETE FROM transcript_segments WHERE episode_id = $1`, [episode.id]);
 
-        for (const chunk of chunks) {
-          const embedding = await this.aiClient.embedText(chunk.text);
-          const embeddingLiteral = embedding.length > 0 ? `[${embedding.join(",")}]` : null;
-
+        for (const { chunk, embeddingLiteral } of embeddedChunks) {
           await client.query(
             `INSERT INTO transcript_segments (
               episode_id,
@@ -215,11 +251,12 @@ export class WorkerService {
          WHERE id = $1`,
         [episode.id, message.slice(0, 500)]
       );
+      throw error;
     }
   }
 
   private async downloadEpisodeAudio(audioUrl: string): Promise<{ buffer: Buffer; mimeType: string }> {
-    const response = await fetch(audioUrl);
+    const response = await fetch(audioUrl, { signal: AbortSignal.timeout(120_000) });
     if (!response.ok) {
       throw new Error(`Failed to download episode audio: ${response.status}`);
     }
@@ -229,15 +266,35 @@ export class WorkerService {
     const maxBytes = this.options.maxEpisodeAudioMb * 1024 * 1024;
 
     if (contentLength && contentLength > maxBytes) {
+      await response.body?.cancel();
       throw new Error(`Episode audio too large (${contentLength} bytes)`);
     }
 
-    const buffer = Buffer.from(await response.arrayBuffer());
-    if (buffer.length > maxBytes) {
-      throw new Error(`Episode audio exceeded size limit (${buffer.length} bytes)`);
+    if (!response.body) {
+      throw new Error("Episode audio response is empty");
+    }
+    const reader = response.body.getReader();
+    const buffers: Buffer[] = [];
+    let downloadedBytes = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        downloadedBytes += value.byteLength;
+        if (downloadedBytes > maxBytes) {
+          await reader.cancel();
+          throw new Error(`Episode audio exceeded size limit (${downloadedBytes} bytes)`);
+        }
+        buffers.push(Buffer.from(value));
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    if (downloadedBytes === 0) {
+      throw new Error("Episode audio response is empty");
     }
 
     const mimeType = response.headers.get("content-type")?.split(";")[0] ?? "audio/mpeg";
-    return { buffer, mimeType };
+    return { buffer: Buffer.concat(buffers, downloadedBytes), mimeType };
   }
 }

@@ -111,10 +111,10 @@ class FakeAIClient implements AIClient {
     };
   }
 
-  async synthesizeSpeech(): Promise<{ audioBase64: string; mimeType: "audio/mpeg" }> {
+  async synthesizeSpeech(): Promise<{ audioBase64: string; mimeType: "audio/wav" }> {
     return {
       audioBase64: Buffer.from("fake-audio").toString("base64"),
-      mimeType: "audio/mpeg"
+      mimeType: "audio/wav"
     };
   }
 }
@@ -175,7 +175,7 @@ describe("API contracts", () => {
       text: "hello"
     });
     expect(ttsResponse.status).toBe(200);
-    expect(ttsResponse.body.mimeType).toBe("audio/mpeg");
+    expect(ttsResponse.body.mimeType).toBe("audio/wav");
   });
 
   it("refuses when retrieval confidence is weak", async () => {
@@ -187,5 +187,32 @@ describe("API contracts", () => {
     expect(response.status).toBe(200);
     expect(response.body.grounded).toBe(false);
     expect(response.body.refusalReason).toBe("insufficient_retrieval_confidence");
+  });
+
+  it("refuses high-scoring retrieval when the answer has no valid citation", async () => {
+    const aiClient = new FakeAIClient();
+    aiClient.answerGrounded = async () => ({
+      answerText: "This claim has no supporting chunk.",
+      citationIndices: [99]
+    });
+    const appWithUncitedAnswer = createApp({
+      repository: new FakeRepository(),
+      aiClient,
+      adminKey: "dev-admin",
+      minGroundingScore: 0.45
+    });
+    const response = await request(appWithUncitedAnswer).post("/v1/qa/answer").send({
+      questionText: "What did the host say?",
+      episodeId: "ep_1"
+    });
+    expect(response.status).toBe(200);
+    expect(response.body.grounded).toBe(false);
+    expect(response.body.citations).toEqual([]);
+    expect(response.body.refusalReason).toBe("insufficient_grounded_citations");
+  });
+
+  it("rejects speech text beyond the supported limit", async () => {
+    const response = await request(app).post("/v1/voice/synthesize").send({ text: "a".repeat(6001) });
+    expect(response.status).toBe(400);
   });
 });

@@ -1,32 +1,59 @@
 # Mobile App (`apps/mobile_flutter`)
 
-Flutter iOS/Android client for the podcast voice Q&A prototype.
+Flutter iOS/Android client for asking questions about podcast transcripts.
 
 ## Features
 
-- Episode library + pagination
-- Episode selection with transcription status
-- Push-to-talk voice question flow
-- Transcript-grounded answer rendering
-- TTS answer playback
-- Citation tap-to-seek playback
+- Searchable episode library with transcription status and **Load more episodes**.
+  Search filters the episodes already loaded; load more to search further.
+- Play or stop the selected episode, and open its details to read the episode notes.
+- A question composer that stays within reach, keyboard submission, and suggested
+  questions to get started.
+- Voice questions: tap to record and tap again to send, or hold while speaking and
+  release to send. Use **Cancel recording** to discard a recording.
+- Transcript-grounded answers that retain your question, with full source excerpts
+  and **Listen from** controls. Playback starts at the cited timestamp and continues
+  through the episode; it is not limited to the displayed excerpt.
+- Optional spoken answers, playback stop controls, and friendly failure messages.
+
+Questions become available when the selected episode's transcript is ready.
+The app shows the text answer even if speech generation or playback fails.
 
 ## Run
 
+Start the API and worker from the repository root first; see the root README.
+Then, from this directory:
+
 ```bash
 flutter pub get
-flutter run --dart-define=API_BASE_URL=http://10.0.2.2:4000
+flutter run
 ```
 
-For iOS simulator use `http://localhost:4000`.mobile_flutter git --version
-git version 2.50.1 (Apple Git-155)
-➜  mobile_flutter npm ping
-npm notice PING https://skimdb.npmjs.com/registry
-npm error code E404
-npm error 404 Not Found - GET https://replicate.npmjs.com/registry/-/ping
-npm error 404
-npm error 404  The requested resource 'ping' could not be found or you do not have permission to access it.
-npm error 404
-npm error 404 Note that you can also install from a
-npm error 404 tarball, folder, http url, or git url.
-npm error A complete log of this run can be found in: /Users/jacob/.npm/_logs/2026-02-18T17_18_30_406Z-debug-0.log
+The default API address is `http://10.0.2.2:4000` on an Android emulator and
+`http://localhost:4000` on an iOS simulator. To use a physical device, supply the
+server's reachable address instead:
+
+```bash
+flutter run --dart-define=API_BASE_URL=http://YOUR_COMPUTER_LAN_IP:4000
+```
+
+Allow microphone access when prompted to record a voice question. Typed questions
+work without microphone permission. Use the speaker icon beside the voice control
+to turn spoken answers on or off. Press **Stop spoken answer** or **Stop audio** to
+interrupt playback.
+
+Android debug/profile builds allow HTTP for local development. Use an HTTPS API
+endpoint in an Android release build. iOS allows local networking and includes the
+microphone and local-network permission descriptions.
+
+## Checks
+
+```bash
+flutter analyze
+flutter test
+```
+
+Tests cover HTTP request/response contracts, recording startup/release races,
+episode selection, citation playback targets, answer/voice failures, and the typed
+question widget flow. Native device recording and playback still require a
+simulator or device test.

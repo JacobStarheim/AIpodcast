@@ -44,6 +44,6 @@ export interface AIClient {
     questionText: string;
     segments: RetrievedSegment[];
   }): Promise<{ answerText: string; citationIndices: number[] }>;
-  synthesizeSpeech(text: string): Promise<{ audioBase64: string; mimeType: "audio/mpeg" }>;
+  synthesizeSpeech(text: string): Promise<{ audioBase64: string; mimeType: "audio/mpeg" | "audio/wav" }>;
 }
 

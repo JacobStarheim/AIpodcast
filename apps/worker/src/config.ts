@@ -18,16 +18,20 @@ export interface WorkerConfig {
   pollIntervalMs: number;
   maxEpisodeAudioMb: number;
   defaultMaxEpisodesPerSource: number;
+  ffmpegPath: string;
+  ffprobePath: string;
 }
 
 export function loadConfig(): WorkerConfig {
   return {
     databaseUrl: process.env.DATABASE_URL ?? "postgresql://podcast:podcast@localhost:5432/podcast_ai",
     openAiApiKey: required("OPENAI_API_KEY"),
-    transcribeModel: process.env.OPENAI_TRANSCRIBE_MODEL ?? "gpt-4o-mini-transcribe",
+    transcribeModel: process.env.OPENAI_TRANSCRIBE_MODEL ?? "gpt-transcribe",
     embedModel: process.env.OPENAI_EMBED_MODEL ?? "text-embedding-3-small",
     pollIntervalMs: Number(process.env.WORKER_POLL_INTERVAL_MS ?? 10_000),
     maxEpisodeAudioMb: Number(process.env.MAX_EPISODE_AUDIO_MB ?? 80),
-    defaultMaxEpisodesPerSource: Number(process.env.DEFAULT_MAX_EPISODES_PER_SOURCE ?? 10)
+    defaultMaxEpisodesPerSource: Number(process.env.DEFAULT_MAX_EPISODES_PER_SOURCE ?? 10),
+    ffmpegPath: process.env.FFMPEG_PATH ?? "ffmpeg",
+    ffprobePath: process.env.FFPROBE_PATH ?? "ffprobe"
   };
 }

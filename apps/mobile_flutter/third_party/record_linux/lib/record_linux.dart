@@ -180,7 +180,7 @@ class RecordLinux extends RecordPlatform {
       await _callFMedia(['--list-dev'],
           recorderId: '', outStreamCtrl: outStreamCtrl);
 
-      return _listInputDevices(recorderId, out);
+      return await _listInputDevices(recorderId, out);
     } finally {
       outStreamCtrl.close();
     }

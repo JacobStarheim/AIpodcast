@@ -45,11 +45,13 @@ function parseDuration(value: unknown): number | null {
   }
 
   if (parts.length === 3) {
-    return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    const [hours = 0, minutes = 0, seconds = 0] = parts;
+    return hours * 3600 + minutes * 60 + seconds;
   }
 
   if (parts.length === 2) {
-    return parts[0] * 60 + parts[1];
+    const [minutes = 0, seconds = 0] = parts;
+    return minutes * 60 + seconds;
   }
 
   return null;
@@ -98,7 +100,7 @@ export function parseRss(xml: string): ParsedRssEpisode[] {
     const description = readText(item.description) || readText(item["content:encoded"]);
     const audioUrl = getEnclosureUrl(item);
 
-    if (!guid || !audioUrl) {
+    if (!guid || !audioUrl || byGuid.has(guid)) {
       continue;
     }
 

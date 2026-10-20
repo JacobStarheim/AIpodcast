@@ -1,140 +1,197 @@
-# AI Podcast Voice Q&A Prototype
+# AI Podcast Voice Q&A
 
-This repository implements a local prototype for transcript-grounded podcast Q&A with voice input/output.
+A local Flutter app for listening to podcasts and asking questions about their
+transcripts. Questions can be typed or recorded. Answers include playable
+citations and optional spoken playback.
 
-## Implemented Scope
+## Listening and questions
 
-- Flutter mobile app at `apps/mobile_flutter` with:
-  - Episode list + pagination
-  - Episode detail/transcription status
-  - Push-to-talk voice question flow
-  - Text answer + spoken answer playback
-  - Citation list with tap-to-seek into episode audio
-- Node/TypeScript API at `apps/api` with `/v1` routes:
-  - `POST /v1/admin/sources`
-  - `POST /v1/admin/ingest/run`
-  - `GET /v1/episodes`
-  - `GET /v1/episodes/:episodeId`
-  - `POST /v1/voice/transcribe`
-  - `POST /v1/qa/answer`
-  - `POST /v1/voice/synthesize`
-- Worker at `apps/worker` for RSS ingest, transcription, chunking, embeddings, and transcript storage
-- Shared API types at `packages/shared-types`
-- Postgres + pgvector via Docker in `infrastructure/docker-compose.yml`
-- SQL schema/init in `infrastructure/init.sql`
-- Seed helper script: `scripts/seed.sh`
+The refreshed interface uses a warm theme and custom local artwork. Search the
+episodes already loaded in the library, open their details, or play and stop the
+original audio. A pinned question composer keeps typed questions and suggestions
+within reach. For voice input, tap to record and tap again to send, or hold while
+speaking; cancel is available during recording.
 
-## Architecture
+Answers show the latest question, clear progress and error messages, and source
+excerpts. Open an excerpt and choose **Listen from** to hear the cited passage.
 
-1. RSS source added via admin route.
-2. Ingest job queued via admin route.
-3. Worker fetches RSS episodes and upserts metadata.
-4. Worker downloads pending episode audio, transcribes, chunks, embeds, stores transcript segments.
-5. Mobile app records voice question and sends to `/v1/voice/transcribe`.
-6. App sends transcription text to `/v1/qa/answer`.
-7. API retrieves top transcript chunks and only answers when retrieval confidence is sufficient.
-8. App sends answer text to `/v1/voice/synthesize`, plays returned MP3.
-9. Citation tap seeks episode audio player to citation timestamp.
+The backend imports RSS episodes, transcribes their audio, stores embeddings in
+PostgreSQL with pgvector, and retrieves evidence for each question. Its current
+model configuration is:
 
-## Guardrails
+| Purpose | Model | Integration |
+| --- | --- | --- |
+| Episode and question transcription | `gpt-transcribe` | Audio Transcriptions API |
+| Answers | `gpt-6-luna` | Responses API with a strict JSON schema |
+| Spoken answers | `gpt-realtime-2.1-mini` | Realtime audio, returned to the app as WAV |
+| Search embeddings | `text-embedding-3-small` | 1536-dimensional vectors |
 
-- Strict grounding: answers are based only on retrieved transcript chunks.
-- Retrieval threshold gate (`MIN_GROUNDING_SCORE`) enforces refusal behavior.
-- Non-refusal responses must include citations.
+Episode audio is decoded into roughly 30-second WAV clips before transcription.
+Citation times come from the actual clip boundaries; they identify a short audio
+passage, not the exact word where a claim starts. A retrieval threshold, validated
+citations, and model instructions support refusal when the evidence is
+insufficient. These checks do not guarantee that every generated claim is correct.
 
-## Local Setup
+## Local setup
 
-### Prerequisites
+Run the commands below from the repository root unless stated otherwise.
 
-- Node.js 20+
-- npm 10+
-- Docker
-- Flutter SDK 3.3+
-- OpenAI API key
+Prerequisites:
 
-### 1) Start Postgres + pgvector
+- Node.js 20+ and npm.
+- Docker with Compose.
+- `ffmpeg` and `ffprobe` on `PATH`.
+- A current Flutter stable SDK; the development environment uses Flutter 3.47.7.
+- Xcode and an iOS simulator for iOS, or Android SDK and an emulator for Android.
+- An OpenAI API key with access to the configured models.
+- macOS `say` for generating the included local demo audio.
+
+### Install and configure
 
 ```bash
-cd infrastructure
-docker compose up -d
+npm ci
+npm run build
+npm run db:up
+cp -n apps/api/.env.example apps/api/.env
+cp -n apps/worker/.env.example apps/worker/.env
 ```
 
-### 2) Install Node dependencies
+Set `OPENAI_API_KEY` in both backend `.env` files. Set `ADMIN_KEY` in the API
+environment. The example database URL matches the included Docker service.
+Keep API keys in the backend environment; the Flutter app only needs the API URL.
+If the media tools are elsewhere, set `FFMPEG_PATH` and `FFPROBE_PATH` in the
+worker environment.
 
-```bash
-cd ..
-npm install
-```
+### Start the services
 
-### 3) Configure env files
-
-```bash
-cp apps/api/.env.example apps/api/.env
-cp apps/worker/.env.example apps/worker/.env
-```
-
-Set `OPENAI_API_KEY` in both files.
-
-### 4) Start API and worker
+Use separate terminals:
 
 ```bash
 npm run dev:api
-# in another shell
+```
+
+```bash
 npm run dev:worker
 ```
 
-### 5) Seed a source and ingest job
+The API listens on port 4000. Verify database access as well as HTTP startup:
 
 ```bash
-API_BASE_URL=http://localhost:4000 ADMIN_KEY=dev-admin ./scripts/seed.sh
+curl --fail http://localhost:4000/health
+curl --fail http://localhost:4000/v1/episodes
 ```
 
-### 6) Run Flutter app
+### Verify the included demo first
+
+Start the demo server in another terminal and keep it running:
+
+```bash
+npm run demo:serve
+```
+
+Then run:
+
+```bash
+npm run test:live
+```
+
+The demo serves a short fictional episode about the research ship Aurora on port
+4100. The live test imports one episode through the normal worker, transcribes a
+spoken question, checks an answer and citation times, verifies refusal for an
+unsupported question, and validates English and Norwegian speech output. It uses
+real, paid OpenAI calls. Repeated runs reuse the demo source and ready episode.
+
+The latest result is saved to `.local/smoke-report.json`, with generated audio in
+`.local/demo/`. See [scripts/README.md](scripts/README.md) for options and the
+individual checks.
+
+### Run Android or iOS
+
+For the Android emulator, forward the demo audio port before launch. The feed
+contains `127.0.0.1:4100` audio URLs, so this forwarding is needed even though the
+API uses the emulator's host address:
+
+```bash
+adb reverse tcp:4100 tcp:4100
+cd apps/mobile_flutter
+flutter pub get
+flutter run -d <android-device-id>
+```
+
+The Android default API URL is `http://10.0.2.2:4000`. Alternatively, run
+`adb reverse tcp:4000 tcp:4000` and pass
+`--dart-define=API_BASE_URL=http://127.0.0.1:4000`.
+
+For the iOS simulator:
 
 ```bash
 cd apps/mobile_flutter
 flutter pub get
-flutter run --dart-define=API_BASE_URL=http://10.0.2.2:4000
+flutter run -d <ios-simulator-id>
 ```
 
-For iOS simulator on macOS, `http://localhost:4000` is typically correct.
+The iOS default API URL is `http://localhost:4000`. Use `flutter devices` to find
+device IDs. Allow microphone access for recorded questions; typed questions work
+without it. Keep the demo server running for citation playback.
 
-## Tests
+Physical devices need reachable API and audio URLs; the included demo server
+serves loopback only. See the [mobile README](apps/mobile_flutter/README.md).
 
-### API tests
+### Import your own podcast
+
+After the included demo passes, add one episode from an RSS feed:
 
 ```bash
-npm --workspace apps/api test
+RSS_URL='https://example.com/podcast/feed.xml' SOURCE_NAME='My podcast' MAX_EPISODES=1 npm run seed
 ```
 
-Coverage includes:
-- Route contract checks across all `/v1` endpoints
-- Retrieval ranking/grounding guardrail behavior
-- Mocked latency budget check
+The helper reads the configured admin key from `apps/api/.env` and reuses an
+existing active source with that RSS URL. Start with one episode to check audio
+availability and transcription before importing more. The worker's default
+download limit is 80 MB per source episode. It splits accepted files into small
+WAV uploads below the transcription API's 25 MB file limit.
 
-### Worker tests
+An episode becomes `ready` only after nonempty, timed transcript chunks and valid
+embeddings are stored. An episode failure marks its ingest job `failed`; a new
+ingest job retries failed episodes and skips already ready ones.
 
-```bash
-npm --workspace apps/worker test
-```
-
-Coverage includes:
-- RSS parse + dedupe by GUID
-- Transcript chunk continuity
-
-### Flutter tests
+## Checks and verification
 
 ```bash
+npm run build
+npm test
 cd apps/mobile_flutter
+flutter analyze
 flutter test
 ```
 
-Coverage includes:
-- Episode pagination behavior via controller
-- Voice state machine transitions
-- Citation seek behavior
-- Pending/network/refusal failure paths
+Backend verification for this revision passed the TypeScript build, 40 API tests,
+17 worker tests, and all eight checks in the real live smoke test. Worker tests
+include actual FFmpeg segmentation; API unit tests use simulated model responses.
+The live smoke report provides separate evidence for the real services.
 
-## Operations Runbook
+Flutter analysis is clean and 63 automated tests passed. Coverage includes
+320×568 layouts at 1.8× text scale with a 260-pixel keyboard, library retry,
+microphone accessibility actions, questions, and playback.
 
-See `RUNBOOK.md` for startup, validation, and troubleshooting steps.
+The refreshed app built and ran on Android and an iPhone 17 simulator running
+iOS 26.5. Native checks passed for the library, episode playback, typed Q&A, and
+voice questions against the real backend. Android's tap and hold recording flows
+passed, as did both recording flows on iOS. Episode rows and source playback expose
+button actions to accessibility services; selecting an episode closes the library,
+and source excerpts support playback and stopping. Physical devices remain
+untested; the live fixture is short and citation precision is about 30 seconds.
+
+See [docs/verification.md](docs/verification.md) for the observations and limits of
+these checks.
+
+## Repository layout
+
+- `apps/mobile_flutter`: Flutter Android/iOS client.
+- `apps/api`: HTTP API, retrieval, answer generation, voice input and output.
+- `apps/worker`: RSS ingestion, audio segmentation, transcription and embeddings.
+- `packages/shared-types`: shared TypeScript API contracts.
+- `infrastructure`: PostgreSQL/pgvector Compose service and schema.
+- `scripts`: deterministic demo, live smoke test and RSS seed helper.
+
+See [RUNBOOK.md](RUNBOOK.md) for operational checks and recovery.

@@ -13,7 +13,7 @@
     "@podcast/shared-types": "file:../../packages/shared-types",
     "dotenv": "^16.4.7",
     "fast-xml-parser": "^4.5.1",
-    "openai": "^4.77.0",
+    "openai": "^7.39.0",
     "pg": "^8.13.1"
   },
   "devDependencies": {

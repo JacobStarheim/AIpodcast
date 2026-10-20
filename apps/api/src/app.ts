@@ -224,6 +224,10 @@ export function createApp(input: {
         res.status(400).json({ error: "text is required" });
         return;
       }
+      if (text.length > 6000) {
+        res.status(400).json({ error: "text must be at most 6000 characters" });
+        return;
+      }
 
       const audio = await input.aiClient.synthesizeSpeech(text);
       res.json(audio);

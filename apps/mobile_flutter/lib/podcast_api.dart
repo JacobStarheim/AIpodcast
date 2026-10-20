@@ -21,9 +21,11 @@ class HttpPodcastApi implements PodcastApi {
   HttpPodcastApi({
     required this.baseUrl,
     http.Client? httpClient,
+    this.requestTimeout = const Duration(seconds: 60),
   }) : _httpClient = httpClient ?? http.Client();
 
   final String baseUrl;
+  final Duration requestTimeout;
   final http.Client _httpClient;
 
   Uri _uri(String path, [Map<String, String>? queryParameters]) {
@@ -42,16 +44,22 @@ class HttpPodcastApi implements PodcastApi {
       query['cursor'] = cursor;
     }
 
-    final response = await _httpClient.get(_uri('/v1/episodes', query));
+    final response = await _httpClient
+        .get(_uri('/v1/episodes', query))
+        .timeout(requestTimeout);
     _throwIfError(response);
-    return EpisodePage.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    return EpisodePage.fromJson(
+        jsonDecode(response.body) as Map<String, dynamic>);
   }
 
   @override
   Future<EpisodeDetailEnvelope> getEpisode(String episodeId) async {
-    final response = await _httpClient.get(_uri('/v1/episodes/$episodeId'));
+    final response = await _httpClient
+        .get(_uri('/v1/episodes/$episodeId'))
+        .timeout(requestTimeout);
     _throwIfError(response);
-    return EpisodeDetailEnvelope.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    return EpisodeDetailEnvelope.fromJson(
+        jsonDecode(response.body) as Map<String, dynamic>);
   }
 
   @override
@@ -60,11 +68,14 @@ class HttpPodcastApi implements PodcastApi {
     final request = http.MultipartRequest('POST', uri)
       ..files.add(await http.MultipartFile.fromPath('audio', audioPath));
 
-    final streamed = await request.send();
-    final response = await http.Response.fromStream(streamed);
+    final response = await _httpClient
+        .send(request)
+        .then(http.Response.fromStream)
+        .timeout(requestTimeout);
     _throwIfError(response);
 
-    return TranscriptionResult.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    return TranscriptionResult.fromJson(
+        jsonDecode(response.body) as Map<String, dynamic>);
   }
 
   @override
@@ -82,31 +93,38 @@ class HttpPodcastApi implements PodcastApi {
       payload['episodeId'] = episodeId;
     }
 
-    final response = await _httpClient.post(
-      _uri('/v1/qa/answer'),
-      headers: _jsonHeaders,
-      body: jsonEncode(payload),
-    );
+    final response = await _httpClient
+        .post(
+          _uri('/v1/qa/answer'),
+          headers: _jsonHeaders,
+          body: jsonEncode(payload),
+        )
+        .timeout(requestTimeout);
 
     _throwIfError(response);
-    return QaResponse.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    return QaResponse.fromJson(
+        jsonDecode(response.body) as Map<String, dynamic>);
   }
 
   @override
   Future<SynthesizedAudio> synthesize(String text) async {
-    final response = await _httpClient.post(
-      _uri('/v1/voice/synthesize'),
-      headers: _jsonHeaders,
-      body: jsonEncode({'text': text}),
-    );
+    final response = await _httpClient
+        .post(
+          _uri('/v1/voice/synthesize'),
+          headers: _jsonHeaders,
+          body: jsonEncode({'text': text}),
+        )
+        .timeout(requestTimeout);
 
     _throwIfError(response);
-    return SynthesizedAudio.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+    return SynthesizedAudio.fromJson(
+        jsonDecode(response.body) as Map<String, dynamic>);
   }
 
   void _throwIfError(http.Response response) {
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw HttpException('Request failed (${response.statusCode}): ${response.body}');
+      throw HttpException(
+          'Request failed (${response.statusCode}): ${response.body}');
     }
   }
 }

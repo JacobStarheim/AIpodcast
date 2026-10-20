@@ -7,6 +7,7 @@ dist/
 !.env.example
 !**/.env.example
 coverage/
+.local/
 .nyc_output/
 apps/mobile_flutter/.dart_tool/
 apps/mobile_flutter/.flutter-plugins

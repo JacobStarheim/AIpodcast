@@ -9,7 +9,11 @@ async function main() {
   const aiClient = new WorkerOpenAiClient({
     apiKey: config.openAiApiKey,
     transcribeModel: config.transcribeModel,
-    embedModel: config.embedModel
+    embedModel: config.embedModel,
+    audioChunkOptions: {
+      ffmpegPath: config.ffmpegPath,
+      ffprobePath: config.ffprobePath
+    }
   });
 
   const worker = new WorkerService(pool, aiClient, {

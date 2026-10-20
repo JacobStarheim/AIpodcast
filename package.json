@@ -9,12 +9,14 @@
     "packages/shared-types"
   ],
   "scripts": {
-    "build": "npm run build -ws --if-present",
-    "test": "npm run test -ws --if-present",
+    "build": "npm run build --workspace packages/shared-types && npm run build --workspace apps/api && npm run build --workspace apps/worker",
+    "test": "npm run test --workspaces --if-present",
     "dev:api": "npm --workspace apps/api run dev",
     "dev:worker": "npm --workspace apps/worker run dev",
     "db:up": "cd infrastructure && docker compose up -d",
     "db:down": "cd infrastructure && docker compose down",
+    "demo:serve": "node scripts/demo-server.mjs",
+    "test:live": "node scripts/smoke-live.mjs",
     "seed": "./scripts/seed.sh"
   },
   "engines": {
