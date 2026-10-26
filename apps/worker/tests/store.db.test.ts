@@ -34,7 +34,7 @@ describe.runIf(databaseUrl)("PostgresWorkerStore against PostgreSQL", () => {
   });
 
   beforeEach(async () => {
-    await pool.query("TRUNCATE rss_sources, episodes, transcript_segments, episode_chapters, ingest_jobs, qa_events CASCADE");
+    await pool.query("TRUNCATE rss_sources, episodes, transcript_segments, episode_chapters, ingest_jobs, qa_events, transcription_usage CASCADE");
   });
 
   async function createSource(name = ""): Promise<string> {
@@ -202,5 +202,55 @@ describe.runIf(databaseUrl)("PostgresWorkerStore against PostgreSQL", () => {
     ]);
     const job = await pool.query("SELECT status FROM ingest_jobs WHERE id = $1", [jobId]);
     expect(job.rows[0].status).toBe("completed");
+  });
+
+  it("keeps the audio file name and counts transcribed seconds", async () => {
+    const sourceId = await createSource();
+    await queueJob(sourceId, 1);
+    await worker(fakeAi(), ["only"]).pollOnce();
+    const episode = await pool.query("SELECT id FROM episodes WHERE guid = 'only'");
+    const id = String(episode.rows[0].id);
+    // The test worker keeps no audio; set what a configured worker would store.
+    await store.saveTranscript(id, 45, [], { file: `${id}.mp3`, mimeType: "audio/mpeg", bytes: 1234 });
+    expect(await store.getStoredAudioFile(id)).toBe(`${id}.mp3`);
+    const row = await pool.query("SELECT audio_mime, audio_bytes FROM episodes WHERE id = $1", [id]);
+    expect(row.rows[0]).toEqual({ audio_mime: "audio/mpeg", audio_bytes: "1234" });
+
+    expect(await store.getTranscribedSecondsToday()).toBe(45);
+    await store.addTranscribedSeconds(15.5);
+    expect(await store.getTranscribedSecondsToday()).toBe(60.5);
+  });
+
+  it("queues refreshes only for feeds that are due and not already queued", async () => {
+    const due = await createSource("Due");
+    const fresh = (await pool.query(
+      "INSERT INTO rss_sources (name, rss_url, last_refreshed_at) VALUES ('Fresh', 'https://feeds.test/fresh', NOW()) RETURNING id"
+    )).rows[0].id;
+    await pool.query("UPDATE rss_sources SET last_refreshed_at = NOW() - INTERVAL '2 hours' WHERE id = $1", [due]);
+
+    expect(await store.enqueueDueRefreshes(3600)).toBe(1);
+    expect(await store.enqueueDueRefreshes(3600)).toBe(0);
+    const jobs = await pool.query("SELECT source_id, max_episodes_per_source FROM ingest_jobs");
+    expect(jobs.rows).toEqual([{ source_id: due, max_episodes_per_source: 0 }]);
+    void fresh;
+  });
+
+  it("selects only episodes first seen after automatic transcription was turned on", async () => {
+    const sourceId = await createSource();
+    await queueJob(sourceId, 0);
+    const ai = fakeAi();
+    await worker(ai, ["old"]).pollOnce();
+    await pool.query("UPDATE rss_sources SET auto_transcribe = TRUE, auto_transcribe_since = NOW() WHERE id = $1", [sourceId]);
+    expect(await store.selectAutoTranscribeEpisodes(sourceId, 5, 3)).toEqual([]);
+
+    await queueJob(sourceId, 0);
+    await worker(ai, ["new", "old"]).pollOnce();
+    const statuses = await pool.query("SELECT guid, transcription_status FROM episodes ORDER BY guid");
+    expect(statuses.rows).toEqual([
+      { guid: "new", transcription_status: "ready" },
+      { guid: "old", transcription_status: "pending" }
+    ]);
+    const refreshed = await pool.query("SELECT last_refreshed_at IS NOT NULL AS refreshed FROM rss_sources");
+    expect(refreshed.rows[0].refreshed).toBe(true);
   });
 });

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  estimatePlayFrom,
+  stemPrefix,
   fuseRankings,
   hasSufficientGrounding,
   sanitizeHistory,
@@ -67,11 +69,11 @@ describe("hasSufficientGrounding", () => {
 describe("searchTerms", () => {
   it("keeps names and numbers and drops common English and Norwegian words", () => {
     expect(searchTerms(["How many sensors does the research ship Aurora carry?", "Hvor mange sensorer har Aurora i 2024?"]))
-      .toEqual(["sensors", "research", "ship", "aurora", "carry", "sensorer", "2024"]);
+      .toEqual(["sensor", "resear", "ship", "aurora", "carry", "2024"]);
   });
 
   it("caps the number of terms", () => {
-    expect(searchTerms(["alpha bravo charlie delta echo"], 3)).toEqual(["alpha", "bravo", "charlie"]);
+    expect(searchTerms(["alpha bravo charlie delta echo"], 3)).toEqual(["alpha", "bravo", "charli"]);
   });
 });
 
@@ -94,5 +96,31 @@ describe("sanitizeHistory", () => {
     expect(history[0]?.question).toBe("q2");
     expect(history[0]?.answer).toHaveLength(1000);
     expect(sanitizeHistory("nope")).toEqual([]);
+  });
+});
+
+describe("stemPrefix", () => {
+  it("shortens long words so inflected forms share a prefix", () => {
+    expect(stemPrefix("driftsperioden")).toBe("driftsperio");
+    expect("driftsperiode".startsWith(stemPrefix("driftsperioden"))).toBe(true);
+    expect(stemPrefix("planlagte")).toBe("planla");
+    expect(stemPrefix("aurora")).toBe("aurora");
+    expect(stemPrefix("2024")).toBe("2024");
+  });
+});
+
+describe("estimatePlayFrom", () => {
+  const passage = { kind: "segment", startSec: 100, endSec: 120, text: "Intro words here. The answer starts now and goes on." };
+
+  it("moves to the quote's position, a little early", () => {
+    const at = estimatePlayFrom(passage, "The answer starts now");
+    expect(at).toBeGreaterThan(100);
+    expect(at).toBeLessThan(107);
+  });
+
+  it("falls back to the passage start", () => {
+    expect(estimatePlayFrom(passage, "words that are not there")).toBe(100);
+    expect(estimatePlayFrom(passage, "")).toBe(100);
+    expect(estimatePlayFrom({ ...passage, kind: "chapter" }, "The answer starts now")).toBe(100);
   });
 });

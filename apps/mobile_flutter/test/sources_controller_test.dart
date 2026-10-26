@@ -141,7 +141,7 @@ void main() {
     final sources = SourcesController(api: api);
     expect(await sources.addPodcast(rssUrl: 'https://feeds.example/x.xml'),
         isNull);
-    expect(sources.addError, 'Too many requests, try again in 1800 s.');
+    expect(sources.addError, 'Too many requests, try again in 30 min.');
     expect(sources.isAdding('https://feeds.example/x.xml'), false);
   });
 

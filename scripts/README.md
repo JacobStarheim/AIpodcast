@@ -70,12 +70,21 @@ The demo server binds IPv4 loopback, so `DEMO_BASE_URL` must use `127.0.0.1` or
   `TEST_DATABASE_SERVER_URL` to use another server.
 - `seed.mjs` (`npm run seed`): adds an RSS source through the admin API and
   queues an import of `MAX_EPISODES` episodes (0 imports only the episode list).
+- `create-user.mjs` (`npm run user:create -- --email <email> --name <name> [--admin]`):
+  creates an account directly in the database (`DATABASE_URL`, else the API
+  environment file). The password comes from `USER_PASSWORD` so it stays out of
+  the shell history; it must be at least 10 characters. A running API can also
+  create accounts with `POST /v1/admin/users`.
 - `eval/run-eval.mjs` (`npm run eval -- --dataset scripts/eval/datasets/<name>.json`):
   asks every question in a dataset through the running API and scores the
   answers: expected keywords in the answer, a passage citation inside the
   window where the answer is said, refusals for questions the episode cannot
-  answer, and latency. `--only id1,id2` runs selected cases and `--top-k n`
-  overrides the number of retrieved passages. Reports go to `.local/eval/`.
-  This uses paid model calls. The episode must be in the library and
-  transcribed; datasets name it by GUID and feed URL.
+  answer, and latency. A case gives that window as `evidence`, phrases that are
+  looked up in the stored transcript, so the dataset still fits after a
+  re-transcription moves the times. `positionAfter` does the same for the
+  listening position of "what did they just say?" questions.
+  `--only id1,id2` runs selected cases and `--top-k n` overrides the
+  number of retrieved passages. Reports go to `.local/eval/`. This uses paid
+  model calls and the API's `APP_API_KEY`. The episode must be in the library
+  and transcribed; datasets name it by GUID and feed URL.
 

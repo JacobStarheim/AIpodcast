@@ -1,0 +1,204 @@
+# Production stack for a single Docker host. Step-by-step guide: docs/deploy.md
+#
+#   cp infrastructure/.env.prod.example infrastructure/.env.prod   # then fill it in
+#   docker compose -f infrastructure/docker-compose.prod.yml \
+#     --env-file infrastructure/.env.prod up -d --build
+#
+# Caddy is the only service with published ports (80/443). PostgreSQL sits on
+# an internal network without a host port or internet access. `migrate` applies
+# pending migrations on every `up`; api and worker start only after it succeeds.
+#
+# Settings come from the --env-file. Values left empty there fall back to the
+# defaults below. A few values are fixed here because the stack depends on them
+# (PORT, AUDIO_STORAGE_DIR, ALLOW_PRIVATE_NETWORK_FEEDS).
+
+# Distinct from the development database project (infrastructure/docker-compose.yml).
+name: podcast_ai_prod
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+x-api-build: &api-build
+  context: ..
+  dockerfile: Dockerfile
+  target: api
+
+# The password ends up in a URL: generate it with `openssl rand -hex 32`.
+x-database-url: &database-url ${DATABASE_URL:-postgresql://podcast:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the env file}@postgres:5432/podcast_ai}
+
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: podcast
+      POSTGRES_DB: podcast_ai
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the env file}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # Room for parallel query workers and HNSW index builds (Docker's default is 64 MB).
+    shm_size: 256mb
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U podcast -d podcast_ai"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    logging: *logging
+
+  # One-shot: applies pending migrations, then exits. Safe to run repeatedly.
+  migrate:
+    build: *api-build
+    command: ["node", "scripts/migrate.mjs"]
+    restart: "no"
+    environment:
+      DATABASE_URL: *database-url
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - backend
+    <<: *hardening
+    logging: *logging
+
+  api:
+    build: *api-build
+    restart: unless-stopped
+    init: true
+    environment:
+      PORT: "4000"
+      ADMIN_KEY: ${ADMIN_KEY:?Set ADMIN_KEY in the env file}
+      APP_API_KEY: ${APP_API_KEY:-}
+      DATABASE_URL: *database-url
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY in the env file}
+      OPENAI_TRANSCRIBE_MODEL: ${OPENAI_TRANSCRIBE_MODEL:-gpt-transcribe}
+      OPENAI_EMBED_MODEL: ${OPENAI_EMBED_MODEL:-text-embedding-3-small}
+      OPENAI_CHAT_MODEL: ${OPENAI_CHAT_MODEL:-gpt-6-luna}
+      OPENAI_PLAN_MODEL: ${OPENAI_PLAN_MODEL:-}
+      OPENAI_TTS_MODEL: ${OPENAI_TTS_MODEL:-gpt-realtime-2.1-mini}
+      MIN_GROUNDING_SCORE: ${MIN_GROUNDING_SCORE:-0.45}
+      PODCAST_SEARCH_COUNTRY: ${PODCAST_SEARCH_COUNTRY:-US}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      TRUST_PROXY: ${TRUST_PROXY:-uniquelocal}
+      AUDIO_STORAGE_DIR: /data/audio
+      MEDIA_URL_SECRET: ${MEDIA_URL_SECRET:?Set MEDIA_URL_SECRET in the env file}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://${DOMAIN:?Set DOMAIN in the env file}}
+    volumes:
+      - audio_data:/data/audio
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - web
+      - backend
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:4000/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    <<: *hardening
+    logging: *logging
+
+  worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: worker
+    restart: unless-stopped
+    init: true
+    environment:
+      DATABASE_URL: *database-url
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY in the env file}
+      OPENAI_TRANSCRIBE_MODEL: ${OPENAI_TRANSCRIBE_MODEL:-gpt-transcribe}
+      OPENAI_EMBED_MODEL: ${OPENAI_EMBED_MODEL:-text-embedding-3-small}
+      OPENAI_CHAT_MODEL: ${OPENAI_CHAT_MODEL:-gpt-6-luna}
+      WORKER_POLL_INTERVAL_MS: ${WORKER_POLL_INTERVAL_MS:-10000}
+      MAX_EPISODE_AUDIO_MB: ${MAX_EPISODE_AUDIO_MB:-500}
+      DEFAULT_MAX_EPISODES_PER_SOURCE: ${DEFAULT_MAX_EPISODES_PER_SOURCE:-10}
+      MAX_TRANSCRIPTION_ATTEMPTS: ${MAX_TRANSCRIPTION_ATTEMPTS:-3}
+      TRANSCRIBE_CONCURRENCY: ${TRANSCRIBE_CONCURRENCY:-4}
+      AUDIO_CHUNK_TARGET_SEC: ${AUDIO_CHUNK_TARGET_SEC:-20}
+      STALE_JOB_MINUTES: ${STALE_JOB_MINUTES:-10}
+      # Never fetch loopback/private addresses on a server others can reach.
+      ALLOW_PRIVATE_NETWORK_FEEDS: "false"
+      FFMPEG_PATH: ${FFMPEG_PATH:-ffmpeg}
+      FFPROBE_PATH: ${FFPROBE_PATH:-ffprobe}
+      AUDIO_STORAGE_DIR: /data/audio
+      FEED_REFRESH_MINUTES: ${FEED_REFRESH_MINUTES:-60}
+      DAILY_TRANSCRIPTION_MINUTES: ${DAILY_TRANSCRIPTION_MINUTES:-180}
+    volumes:
+      - audio_data:/data/audio
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - web
+      - backend
+    <<: *hardening
+    logging: *logging
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    # Runs unprivileged. The sysctl lets it bind 80/443 inside its own network
+    # namespace. /data/caddy and /config/caddy in the image are world-writable
+    # (sticky), so the volumes work for this user.
+    user: "1000:1000"
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: "0"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # The caddy binary carries a file capability; the kernel refuses to exec it
+    # unless that capability is in the bounding set.
+    cap_add:
+      - NET_BIND_SERVICE
+    environment:
+      DOMAIN: ${DOMAIN:?Set DOMAIN in the env file}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data # certificates and ACME account: keep this volume
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - web
+    logging: *logging
+
+networks:
+  # Caddy <-> api, and outbound internet for api and worker (OpenAI, feeds).
+  web: {}
+  # Database traffic only; no route to the internet or the host.
+  backend:
+    internal: true
+
+volumes:
+  postgres_data:
+  # Episode audio, shared by api and worker.
+  audio_data:
+  caddy_data:
+  caddy_config:

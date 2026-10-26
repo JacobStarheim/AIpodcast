@@ -163,3 +163,36 @@ void showReadingSheet(BuildContext context, String title, String body) {
     ),
   );
 }
+
+/// The app's logo: a small waveform on an orange tile.
+class BrandMark extends StatelessWidget {
+  const BrandMark({super.key, this.size = 32});
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    final scale = size / 32;
+    return ExcludeSemantics(
+      child: Container(
+        width: size,
+        height: size,
+        decoration: BoxDecoration(
+            color: AppColors.orange,
+            borderRadius: BorderRadius.circular(10 * scale)),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [9.0, 18.0, 13.0, 7.0]
+              .map((height) => Container(
+                    width: 3 * scale,
+                    height: height * scale,
+                    margin: EdgeInsets.symmetric(horizontal: 1.3 * scale),
+                    decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(3 * scale)),
+                  ))
+              .toList(),
+        ),
+      ),
+    );
+  }
+}

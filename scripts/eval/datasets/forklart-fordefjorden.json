@@ -1,0 +1,285 @@
+{
+  "name": "forklart-fordefjorden",
+  "description": "Forklart (Aftenposten), 'Kampen om Førdefjorden: Trosser regjeringen Høyesterett?' (17 min, Norwegian). Expected answers come from the transcript; evidence phrases locate where they are said.",
+  "episode": {
+    "guid": "ap-141278",
+    "rssUrl": "https://podcast.stream.schibsted.media/ap/100194?podcast"
+  },
+  "cases": [
+    {
+      "id": "n-mineral",
+      "kind": "fact",
+      "question": "Hvilket mineral vil Nordic Mining utvinne?",
+      "keywords": [
+        [
+          "rutil"
+        ]
+      ],
+      "evidence": [
+        "som heter rutil"
+      ]
+    },
+    {
+      "id": "n-use",
+      "kind": "fact",
+      "question": "Hva brukes rutil til?",
+      "keywords": [
+        [
+          "hvitmaling",
+          "maling"
+        ]
+      ],
+      "evidence": [
+        "brukes i hvitmaling"
+      ]
+    },
+    {
+      "id": "n-amount",
+      "kind": "fact",
+      "question": "Hvor mye gruveavfall var det snakk om i første omgang?",
+      "keywords": [
+        [
+          "250"
+        ]
+      ],
+      "evidence": [
+        "250 millioner tonn"
+      ]
+    },
+    {
+      "id": "n-period",
+      "kind": "fact",
+      "question": "Hvor lang var den planlagte driftsperioden?",
+      "keywords": [
+        [
+          "50",
+          "femti"
+        ]
+      ],
+      "evidence": [
+        "rundt 50 år"
+      ]
+    },
+    {
+      "id": "n-tower",
+      "kind": "fact",
+      "question": "Hvor høyt ville tårnet av gruveavfall på Ullevål stadion blitt?",
+      "keywords": [
+        [
+          "16",
+          "seksten"
+        ]
+      ],
+      "evidence": [
+        "16 kilometer"
+      ]
+    },
+    {
+      "id": "n-plaintiffs",
+      "kind": "fact",
+      "question": "Hvem saksøkte staten?",
+      "keywords": [
+        [
+          "Naturvernforbundet"
+        ],
+        [
+          "Natur og Ungdom"
+        ]
+      ],
+      "evidence": [
+        "saksøkte staten"
+      ]
+    },
+    {
+      "id": "n-case-name",
+      "kind": "fact",
+      "question": "Hva kalles søksmålet mot staten?",
+      "keywords": [
+        [
+          "Fjordsøksmål"
+        ]
+      ],
+      "evidence": [
+        "Fjordsøksmålet"
+      ]
+    },
+    {
+      "id": "n-directive",
+      "kind": "fact",
+      "question": "Hvilket EU-direktiv var tillatelsen i strid med?",
+      "keywords": [
+        [
+          "vanndirektiv"
+        ]
+      ],
+      "evidence": [
+        "vanndirektiv"
+      ]
+    },
+    {
+      "id": "n-temporary",
+      "kind": "fact",
+      "question": "Hvor lenge varer den nye midlertidige tillatelsen?",
+      "keywords": [
+        [
+          "tre år",
+          "3 år"
+        ]
+      ],
+      "evidence": [
+        "tre år med midlertidig dumping"
+      ]
+    },
+    {
+      "id": "n-fosen",
+      "kind": "fact",
+      "question": "Hvilken annen sak blir det trukket paralleller til?",
+      "keywords": [
+        [
+          "Fosen"
+        ]
+      ],
+      "evidence": [
+        "Fosen-saken"
+      ]
+    },
+    {
+      "id": "n-fosen-year",
+      "kind": "fact",
+      "question": "Hvilket år slo Høyesterett fast at tillatelsene på Fosen var ugyldige?",
+      "keywords": [
+        [
+          "2021"
+        ]
+      ],
+      "evidence": [
+        "i 2021 slo Høyesterett fast"
+      ]
+    },
+    {
+      "id": "n-money",
+      "kind": "fact",
+      "question": "Hvordan går det økonomisk med Nordic Mining?",
+      "keywords": [
+        [
+          "konkurs",
+          "penge",
+          "økonomisk"
+        ]
+      ],
+      "evidence": [
+        "sliter på pengefronten"
+      ]
+    },
+    {
+      "id": "n-parties",
+      "kind": "fact",
+      "question": "Hvilke partier vil ta saken inn i budsjettforhandlingene?",
+      "keywords": [
+        [
+          "SV",
+          "Sosialistisk"
+        ],
+        [
+          "Miljøpartiet",
+          "MDG"
+        ]
+      ],
+      "evidence": [
+        "SV og Miljøpartiet"
+      ]
+    },
+    {
+      "id": "e-mineral",
+      "kind": "translated",
+      "question": "What mineral does Nordic Mining want to extract?",
+      "keywords": [
+        [
+          "rutile",
+          "rutil"
+        ]
+      ],
+      "evidence": [
+        "som heter rutil"
+      ]
+    },
+    {
+      "id": "e-court",
+      "kind": "translated",
+      "question": "What did the Supreme Court decide about the permit?",
+      "keywords": [
+        [
+          "invalid",
+          "ugyldig"
+        ]
+      ],
+      "evidence": [
+        "var ugyldig",
+        "var ugyldige"
+      ]
+    },
+    {
+      "id": "fu-sami",
+      "kind": "followup",
+      "question": "Hvem fikk rettighetene sine krenket der?",
+      "history": [
+        {
+          "question": "Hvilken sak trekkes det paralleller til?",
+          "answer": "Fosen-saken, der Høyesterett i 2021 kjente tillatelsene til vindkraftverkene ugyldige."
+        }
+      ],
+      "keywords": [
+        [
+          "reindrift",
+          "samisk",
+          "samene"
+        ]
+      ],
+      "evidence": [
+        "samiske reindriftsutøvere"
+      ]
+    },
+    {
+      "id": "o-about",
+      "kind": "overview",
+      "question": "Hva handler episoden om?",
+      "keywords": [
+        [
+          "Førdefjord"
+        ],
+        [
+          "Høyesterett",
+          "dom"
+        ]
+      ]
+    },
+    {
+      "id": "h-tower",
+      "kind": "heard",
+      "question": "Hva sa de nettopp om Ullevål stadion?",
+      "positionAfter": "16 kilometer høyt tårn",
+      "keywords": [
+        [
+          "16",
+          "seksten",
+          "tårn"
+        ]
+      ],
+      "evidence": [
+        "16 kilometer"
+      ]
+    },
+    {
+      "id": "u-ceo",
+      "kind": "unanswerable",
+      "question": "Hvem er administrerende direktør i Nordic Mining?",
+      "refuse": true
+    },
+    {
+      "id": "u-cost",
+      "kind": "unanswerable",
+      "question": "Hvor mye koster det å bygge ut gruven?",
+      "refuse": true
+    }
+  ]
+}

@@ -1,5 +1,6 @@
-import type { Citation, EpisodeDetail, QAResponse, QATurn } from "@podcast/shared-types";
-import { fuseRankings, searchTerms } from "./retrieval.js";
+import type { Citation, EpisodeDetail, QAResponse, QAStreamEvent, QATurn } from "@podcast/shared-types";
+import { detectLanguage, refusalText } from "./localize.js";
+import { estimatePlayFrom, fuseRankings, searchTerms } from "./retrieval.js";
 import { HttpError } from "./security.js";
 import type { AIClient, Evidence, Repository, RetrievedSegment, SearchPlan } from "./types.js";
 
@@ -16,9 +17,10 @@ export interface QaInput {
   positionSec?: number;
   history: QATurn[];
   topK: number;
+  /** Receives progress and the answer text as it is written (streaming route). */
+  onEvent?: (event: Exclude<QAStreamEvent, { type: "done" | "error" }>) => void;
+  signal?: AbortSignal;
 }
-
-const refusalText = "I do not have enough transcript evidence to answer that confidently.";
 /** How much audio before the playback position counts as "just heard". */
 const RECENT_WINDOW_SEC = 90;
 /** Similarity above the grounding threshold at which the search plan is skipped. */
@@ -32,18 +34,27 @@ function chapterEvidence(episode: EpisodeDetail): Evidence[] {
     episodeTitle: episode.title,
     startSec: chapter.startSec,
     endSec: chapter.endSec,
+    playFromSec: chapter.startSec,
     text: `${chapter.title}: ${chapter.summary}`,
     score: 0
   }));
 }
 
-/** A keyword hit counts as evidence when it contains most of the distinctive terms. */
-function strongKeywordMatch(hits: RetrievedSegment[], terms: string[]): boolean {
-  const best = hits[0];
-  if (!best || terms.length === 0) return false;
-  const text = best.text.toLocaleLowerCase();
-  const found = terms.filter((term) => text.includes(term)).length;
-  return found >= Math.min(terms.length, Math.max(2, Math.ceil(terms.length / 2)));
+/**
+ * A keyword hit counts as evidence when one of the top hits contains most of
+ * the distinctive terms of one query (the question or a rewrite). Pooling the
+ * terms of all queries would demand too much.
+ */
+function strongKeywordMatch(hits: RetrievedSegment[], queries: string[]): boolean {
+  return hits.slice(0, 3).some((hit) => {
+    const text = hit.text.toLocaleLowerCase();
+    return queries.some((query) => {
+      const terms = searchTerms([query]);
+      if (terms.length === 0) return false;
+      const found = terms.filter((term) => text.includes(term)).length;
+      return found >= Math.min(terms.length, Math.max(2, Math.ceil(terms.length / 2)));
+    });
+  });
 }
 
 function toCitation(evidence: Evidence): Citation {
@@ -74,14 +85,14 @@ export async function answerQuestion(deps: QaDependencies, input: QaInput): Prom
     });
     return response;
   };
-  const refuse = (refusalReason: string) =>
-    finish({ answerText: refusalText, citations: [], grounded: false, refusalReason });
+  input.onEvent?.({ type: "status", stage: "searching" });
 
   // Rewrite follow-ups into standalone queries and translate them into the
   // transcript language, so "what did he mean?" or a Norwegian question about
   // an English episode still finds the right passages. Planning is the
   // slowest step, so it runs while the question as asked is searched.
   const planAbort = new AbortController();
+  input.signal?.addEventListener("abort", () => planAbort.abort(), { once: true });
   const planned: Promise<SearchPlan> = (async () => aiClient.planSearch({
     questionText: input.questionText,
     history: input.history,
@@ -113,6 +124,11 @@ export async function answerQuestion(deps: QaDependencies, input: QaInput): Prom
   } else {
     plan = await planned;
   }
+  // Told explicitly, the answer model no longer drifts into the language of
+  // the evidence (an English question about a Norwegian episode).
+  const questionLanguage = plan.language ?? detectLanguage(input.questionText);
+  const refuse = (refusalReason: string) =>
+    finish({ answerText: refusalText(questionLanguage), citations: [], grounded: false, refusalReason });
 
   const extraQueries = [...new Set(plan.queries.map((query) => query.trim()).filter(Boolean))]
     .filter((query) => query !== input.questionText)
@@ -143,7 +159,7 @@ export async function answerQuestion(deps: QaDependencies, input: QaInput): Prom
 
   const hasEvidence =
     topVectorScore >= deps.minGroundingScore ||
-    strongKeywordMatch(keywordHits, terms) ||
+    strongKeywordMatch(keywordHits, queries) ||
     recentlyHeard.length > 0 ||
     (plan.overview && (chapters.length > 0 || Boolean(episode?.summary)));
   if (!hasEvidence) {
@@ -159,15 +175,23 @@ export async function answerQuestion(deps: QaDependencies, input: QaInput): Prom
     ...chapters.slice(0, 24)
   ];
 
+  input.onEvent?.({ type: "status", stage: "answering" });
+  const onEvent = input.onEvent;
   const answer = await aiClient.answerGrounded({
     questionText: input.questionText,
+    questionLanguage,
     evidence,
     history: input.history,
-    episodeSummary: episode?.summary ?? null
+    episodeSummary: episode?.summary ?? null,
+    signal: input.signal,
+    ...(onEvent ? { onDelta: (text: string) => onEvent({ type: "delta", text }) } : {})
   });
-  const citations = [...new Set(answer.citationIndices)]
-    .filter((index) => Number.isInteger(index) && index >= 0 && index < evidence.length)
-    .map((index) => toCitation(evidence[index]!));
+  const citations = answer.citations
+    .filter((cited) => Number.isInteger(cited.index) && cited.index >= 0 && cited.index < evidence.length)
+    .map((cited) => {
+      const item = evidence[cited.index]!;
+      return toCitation({ ...item, playFromSec: estimatePlayFrom(item, cited.quote) });
+    });
 
   if (!answer.answerText.trim() || citations.length === 0) {
     return refuse("insufficient_grounded_citations");

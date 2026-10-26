@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import dotenv from "dotenv";
 
 dotenv.config();
@@ -6,6 +7,15 @@ function required(name: string): string {
   const value = process.env[name];
   if (!value) {
     throw new Error(`Missing required env var: ${name}`);
+  }
+  return value;
+}
+
+function nonNegativeNumber(name: string, fallback: number): number {
+  const raw = process.env[name];
+  const value = raw === undefined || raw === "" ? fallback : Number(raw);
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error(`${name} must be zero or a positive number`);
   }
   return value;
 }
@@ -33,6 +43,9 @@ export interface WorkerConfig {
   audioChunkTargetSec: number;
   allowPrivateNetwork: boolean;
   staleJobSec: number;
+  audioStorageDirectory: string;
+  feedRefreshSec: number;
+  dailyTranscriptionSec: number;
   ffmpegPath: string;
   ffprobePath: string;
 }
@@ -52,6 +65,11 @@ export function loadConfig(): WorkerConfig {
     audioChunkTargetSec: positiveNumber("AUDIO_CHUNK_TARGET_SEC", 20),
     allowPrivateNetwork: process.env.ALLOW_PRIVATE_NETWORK_FEEDS === "true",
     staleJobSec: positiveNumber("STALE_JOB_MINUTES", 10) * 60,
+    // npm runs the workspace from apps/worker, so this is <repo>/.local/audio.
+    audioStorageDirectory: resolve(process.env.AUDIO_STORAGE_DIR || "../../.local/audio"),
+    // 0 disables the periodic refresh / the daily limit.
+    feedRefreshSec: nonNegativeNumber("FEED_REFRESH_MINUTES", 60) * 60,
+    dailyTranscriptionSec: nonNegativeNumber("DAILY_TRANSCRIPTION_MINUTES", 180) * 60,
     ffmpegPath: process.env.FFMPEG_PATH ?? "ffmpeg",
     ffprobePath: process.env.FFPROBE_PATH ?? "ffprobe"
   };

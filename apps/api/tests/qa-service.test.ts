@@ -26,7 +26,7 @@ describe("answerQuestion", () => {
     expect(aiClient.embedded).toEqual([["Hvor mange sensorer har Aurora?"], ["how many sensors does Aurora carry"]]);
     expect(repository.vectorQueries).toHaveLength(2);
     expect(repository.vectorQueries.every((query) => query.episodeId === EPISODE_ID)).toBe(true);
-    expect(repository.textQueries[0]?.terms).toEqual(["sensorer", "aurora", "sensors", "carry"]);
+    expect(repository.textQueries[0]?.terms).toEqual(["sensor", "aurora", "carry"]);
   });
 
   it("falls back to the question as asked when planning fails", async () => {
@@ -96,7 +96,7 @@ describe("answerQuestion", () => {
     aiClient.plan = { queries: ["unsupported overview"], overview: true };
     aiClient.answerGrounded = async (input) => {
       aiClient.answerCalls.push(input);
-      return { answerText: "It covers the architecture.", citationIndices: [input.evidence.length - 1] };
+      return { answerText: "It covers the architecture.", citations: [{ index: input.evidence.length - 1, quote: "" }] };
     };
     const response = await ask({ questionText: "unsupported: what is this episode about?", episodeId: EPISODE_ID });
 
@@ -148,5 +148,50 @@ describe("answerQuestion", () => {
     repository.neighbours = [segment({ segmentId: "seg_next", startSec: 152, endSec: 170, text: "The answer is here." })];
     await ask({ questionText: "What did the host say?", episodeId: EPISODE_ID });
     expect(aiClient.answerCalls[0]?.evidence.map((item) => item.segmentId)).toEqual(["seg_1", "seg_next", "chapter:c1"]);
+  });
+
+  it("refuses in the language of the question", async () => {
+    const { aiClient, ask } = setup();
+    aiClient.defaultScore = 0.1;
+    aiClient.plan = { queries: [], overview: false, language: "nb" };
+    const planned = await ask({ questionText: "unsupported: hva heter kapteinen?", episodeId: EPISODE_ID });
+    expect(planned.answerText).toBe("Jeg finner ikke nok i transkripsjonen til å svare sikkert på det.");
+
+    aiClient.plan = { queries: [], overview: false, language: null };
+    const guessed = await ask({ questionText: "unsupported: hvem er kapteinen på skipet?", episodeId: EPISODE_ID });
+    expect(guessed.answerText).toContain("Jeg finner ikke nok");
+  });
+
+  it("tells the answer model the question's language", async () => {
+    const { aiClient, ask } = setup();
+    aiClient.plan = { queries: [], overview: false, language: "en" };
+    await ask({ questionText: "Hva sa de om fjorden?", episodeId: EPISODE_ID, history: [{ question: "Q", answer: "A" }] });
+    expect(aiClient.answerCalls[0]?.questionLanguage).toBe("en");
+
+    // A confident first question skips the planner; the language is detected.
+    await ask({ questionText: "What does the ship carry?", episodeId: EPISODE_ID });
+    expect(aiClient.answerCalls[1]?.questionLanguage).toBe("en");
+    await ask({ questionText: "Zeigt Aurora Sensoren?", episodeId: EPISODE_ID });
+    expect(aiClient.answerCalls[2]?.questionLanguage).toBeNull();
+  });
+
+  it("estimates where to start playing from the cited quote", async () => {
+    const { repository, aiClient, ask } = setup();
+    repository.vectorResults = [segment({ startSec: 100, endSec: 120, text: "First part of the passage. The answer begins right here and continues." })];
+    aiClient.answer = { answerText: "It begins here.", citations: [{ index: 0, quote: "The answer begins right here" }] };
+    const response = await ask({ questionText: "Where does it begin?", episodeId: EPISODE_ID });
+    expect(response.citations[0]?.playFromSec).toBeGreaterThan(100);
+    expect(response.citations[0]?.playFromSec).toBeLessThan(110);
+  });
+
+  it("reports progress and streams the answer text when asked", async () => {
+    const { ask } = setup();
+    const events: unknown[] = [];
+    const response = await ask({ questionText: "What did the host say?", episodeId: EPISODE_ID, onEvent: (event) => events.push(event) });
+    expect(events[0]).toEqual({ type: "status", stage: "searching" });
+    expect(events).toContainEqual({ type: "status", stage: "answering" });
+    const streamed = events.filter((event) => (event as { type: string }).type === "delta")
+      .map((event) => (event as { text: string }).text).join("");
+    expect(streamed).toBe(response.answerText);
   });
 });

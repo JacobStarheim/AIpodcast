@@ -37,7 +37,11 @@ class SourcesController extends ChangeNotifier {
   final List<String> recentlyAdded = <String>[];
   String? addError;
 
+  /// Why changing a podcast's settings failed, by source id.
+  final Map<String, String> settingsErrors = <String, String>{};
+
   final Set<String> _adding = <String>{};
+  final Set<String> _savingSettings = <String>{};
   final Map<String, String> _addedFeeds = <String, String>{};
   Set<String> _importing = <String>{};
   Timer? _pollTimer;
@@ -52,6 +56,8 @@ class SourcesController extends ChangeNotifier {
   bool get isImporting => items.any(_isImporting);
 
   bool isAdding(String feedUrl) => _adding.contains(feedUrl.trim());
+
+  bool isSavingSettings(String sourceId) => _savingSettings.contains(sourceId);
 
   SourceSummary? sourceById(String id) {
     for (final source in items) {
@@ -214,6 +220,42 @@ class SourcesController extends ChangeNotifier {
   void dismissAddError() {
     addError = null;
     _notify();
+  }
+
+  void _replace(SourceSummary source) {
+    items = List.unmodifiable(
+        [for (final item in items) item.id == source.id ? source : item]);
+  }
+
+  /// Turns automatic transcription of new episodes of [sourceId] on or off.
+  /// The switch moves right away and moves back if the server refuses.
+  Future<void> setAutoTranscribe(String sourceId, bool value) async {
+    final current = sourceById(sourceId);
+    if (_closed || current == null || _savingSettings.contains(sourceId)) {
+      return;
+    }
+    if (current.autoTranscribe == value) return;
+    _savingSettings.add(sourceId);
+    settingsErrors.remove(sourceId);
+    _replace(current.copyWith(autoTranscribe: value));
+    _notify();
+    try {
+      final updated =
+          await _api.updateSource(sourceId, autoTranscribe: value);
+      if (_closed) return;
+      _replace(updated);
+    } catch (error) {
+      if (_closed) return;
+      final latest = sourceById(sourceId);
+      if (latest != null) {
+        _replace(latest.copyWith(autoTranscribe: current.autoTranscribe));
+      }
+      settingsErrors[sourceId] = describeError(error,
+          fallback: 'We couldn’t change that setting. Please try again.');
+    } finally {
+      _savingSettings.remove(sourceId);
+      _notify();
+    }
   }
 
   void close() {

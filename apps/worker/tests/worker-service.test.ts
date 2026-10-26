@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PermanentError } from "../src/errors.js";
 import type { TranscriptionResult, WorkerAiClient } from "../src/openai-client.js";
 import type { ParsedFeed } from "../src/rss.js";
@@ -9,10 +11,11 @@ import type {
   EpisodeRecord,
   SegmentToStore,
   SourceRecord,
+  StoredAudio,
   WorkerStore
 } from "../src/store.js";
 import type { EpisodeSummaryResult, TimedText } from "../src/summarize.js";
-import { WorkerService } from "../src/worker-service.js";
+import { BUDGET_EXCEEDED_MESSAGE, WorkerService } from "../src/worker-service.js";
 
 interface MemoryJob extends ClaimedJob {
   status: "queued" | "processing" | "completed" | "failed";
@@ -28,15 +31,23 @@ interface MemoryEpisode extends EpisodeRecord {
   summaryAttempts: number;
   segments: SegmentToStore[];
   chapters: ChapterToStore[];
+  audio: StoredAudio | null;
+  firstSeenAt: number;
 }
 
-const source: SourceRecord = { id: "source-1", name: "Test podcast", rssUrl: "https://podcast.test/feed.xml" };
+const source: SourceRecord = {
+  id: "source-1", name: "Test podcast", rssUrl: "https://podcast.test/feed.xml", autoTranscribe: false
+};
 
 /** In-memory WorkerStore with the same rules as the SQL in PostgresWorkerStore. */
 class MemoryStore implements WorkerStore {
   jobs: MemoryJob[] = [];
   episodes: MemoryEpisode[] = [];
   feeds: ParsedFeed[] = [];
+  transcribedSeconds = 0;
+  refreshIntervals: number[] = [];
+  autoTranscribeSince: number | null = null;
+  clock = 0;
 
   queueJob(fields: Partial<ClaimedJob> = {}): string {
     const id = `job-${this.jobs.length + 1}`;
@@ -91,13 +102,39 @@ class MemoryStore implements WorkerStore {
         Object.assign(existing, { title: item.title, audioUrl: item.audioUrl, publishedAt: item.publishedAt });
         continue;
       }
+      this.clock += 1;
       this.episodes.push({
-        id: `episode-${this.episodes.length + 1}`, sourceId, guid: item.guid, title: item.title,
-        audioUrl: item.audioUrl, publishedAt: item.publishedAt, status: "pending",
-        durationSec: item.durationSec, attempts: 0, error: null, summary: null, summaryAttempts: 0,
-        segments: [], chapters: []
+        id: `episode-${this.episodes.length + 1}`, sourceId, sourceName: source.name, guid: item.guid,
+        title: item.title, description: item.description, audioUrl: item.audioUrl, publishedAt: item.publishedAt,
+        status: "pending", durationSec: item.durationSec, attempts: 0, error: null, summary: null,
+        summaryAttempts: 0, segments: [], chapters: [], audio: null, firstSeenAt: this.clock
       });
     }
+  }
+
+  async enqueueDueRefreshes(intervalSec: number): Promise<number> {
+    this.refreshIntervals.push(intervalSec);
+    return 0;
+  }
+
+  async selectAutoTranscribeEpisodes(sourceId: string, limit: number, maxAttempts: number): Promise<EpisodeRecord[]> {
+    if (!source.autoTranscribe || this.autoTranscribeSince === null) return [];
+    return this.episodes
+      .filter((episode) => episode.sourceId === sourceId && episode.firstSeenAt > this.autoTranscribeSince! &&
+        ["pending", "failed"].includes(episode.status) && episode.attempts < maxAttempts)
+      .slice(0, limit);
+  }
+
+  async getStoredAudioFile(episodeId: string): Promise<string | null> {
+    return this.episodes.find((item) => item.id === episodeId)?.audio?.file ?? null;
+  }
+
+  async getTranscribedSecondsToday(): Promise<number> {
+    return this.transcribedSeconds;
+  }
+
+  async addTranscribedSeconds(seconds: number): Promise<void> {
+    this.transcribedSeconds += seconds;
   }
 
   async getEpisode(episodeId: string): Promise<EpisodeRecord | null> {
@@ -119,10 +156,15 @@ class MemoryStore implements WorkerStore {
     return true;
   }
 
-  async saveTranscript(episodeId: string, durationSec: number, segments: SegmentToStore[]): Promise<void> {
+  async saveTranscript(
+    episodeId: string,
+    durationSec: number,
+    segments: SegmentToStore[],
+    audio: StoredAudio | null
+  ): Promise<void> {
     const episode = this.episodes.find((item) => item.id === episodeId)!;
     Object.assign(episode, {
-      status: "ready", error: null, segments, chapters: [], summary: null, summaryAttempts: 0,
+      status: "ready", error: null, segments, chapters: [], summary: null, summaryAttempts: 0, audio,
       durationSec: episode.durationSec ?? Math.round(durationSec)
     });
   }
@@ -187,14 +229,19 @@ function validSummary(): EpisodeSummaryResult {
 function rssFor(guids: string[]): string {
   return `<rss version="2.0"><channel><title>Test podcast</title><language>en</language>${guids
     .map((guid, index) => `<item>
-        <guid>${guid}</guid><title>${guid}</title><description>Test episode</description>
+        <guid>${guid}</guid><title>${guid}</title>
+        <description>&lt;p&gt;Ada Lovelace talks with Grace Hopper.&lt;/p&gt;</description>
+        <itunes:duration xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">600</itunes:duration>
         <pubDate>${new Date(Date.UTC(2026, 0, 10 - index)).toUTCString()}</pubDate>
         <enclosure url="https://podcast.test/${guid}.mp3" type="audio/mpeg" />
       </item>`)
     .join("")}</channel></rss>`;
 }
 
-function setup(episodeGuids = ["episode-one"], options: { maxAttempts?: number; maxAudioBytes?: number } = {}) {
+function setup(
+  episodeGuids = ["episode-one"],
+  options: { maxAttempts?: number; maxAudioBytes?: number; dailySec?: number; audioDirectory?: string } = {}
+) {
   const store = new MemoryStore();
   const audioFetches: string[] = [];
   const fetchImpl = vi.fn(async (url: string) => {
@@ -218,14 +265,27 @@ function setup(episodeGuids = ["episode-one"], options: { maxAttempts?: number; 
     maxTranscriptionAttempts: options.maxAttempts ?? 3,
     // Test URLs resolve nowhere; the guard has its own tests.
     allowPrivateNetwork: true,
+    dailyTranscriptionSec: options.dailySec,
+    audioStorageDirectory: options.audioDirectory,
+    feedRefreshSec: 3600,
     fetchImpl: fetchImpl as unknown as typeof fetch
   });
   return { store, ai, worker, fetchImpl, audioFetches };
 }
 
-afterEach(() => {
+const directories: string[] = [];
+
+afterEach(async () => {
   vi.restoreAllMocks();
+  source.autoTranscribe = false;
+  await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
+
+async function audioDirectory(): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), "worker-audio-test-"));
+  directories.push(directory);
+  return directory;
+}
 
 describe("WorkerService ingest outcomes", () => {
   it("marks the job failed when an episode fails, while still indexing the remaining episodes", async () => {
@@ -382,7 +442,7 @@ describe("WorkerService ingest outcomes", () => {
     await worker.pollOnce();
     expect(ai.summarizeTranscript).toHaveBeenCalledWith(expect.objectContaining({
       title: "episode-one",
-      durationSec: 20,
+      durationSec: 600,
       segments: [expect.objectContaining({ startSec: 0, endSec: 20 })]
     }));
     expect(store.episode("episode-one")).toMatchObject({
@@ -454,5 +514,81 @@ describe("WorkerService ingest outcomes", () => {
     await worker.pollOnce();
     expect(store.job(jobId)).toMatchObject({ status: "failed" });
     expect(store.job(jobId).error).toContain("HTTP 404");
+  });
+
+  it("passes names from the episode description to transcription", async () => {
+    const { store, ai, worker } = setup();
+    store.queueJob();
+    await worker.pollOnce();
+    expect(ai.transcribeEpisodeAudio.mock.calls[0]?.[0].prompt)
+      .toBe("Test podcast. episode-one. Ada Lovelace, Grace Hopper.");
+  });
+
+  it("keeps the transcribed audio file and replaces it on re-transcription", async () => {
+    const directory = await audioDirectory();
+    const { store, worker } = setup(["episode-one"], { audioDirectory: directory });
+    store.queueJob();
+    await worker.pollOnce();
+    const episode = store.episode("episode-one");
+    expect(episode.audio).toEqual({ file: `${episode.id}.mp3`, mimeType: "audio/mpeg", bytes: 10 });
+    expect(await readFile(join(directory, `${episode.id}.mp3`), "utf8")).toBe("fake-audio");
+
+    // An older copy with another extension is removed once the new one is saved.
+    await writeFile(join(directory, `${episode.id}.m4a`), "old");
+    Object.assign(episode, { status: "queued", audio: { file: `${episode.id}.m4a`, mimeType: "audio/mp4", bytes: 3 } });
+    store.queueJob({ sourceId: null, episodeId: episode.id });
+    await worker.pollOnce();
+    expect((await readdir(directory)).sort()).toEqual([`${episode.id}.mp3`]);
+  });
+
+  it("counts transcribed audio towards the daily limit", async () => {
+    const { store, worker } = setup();
+    store.queueJob();
+    await worker.pollOnce();
+    expect(store.transcribedSeconds).toBe(20);
+  });
+
+  it("fails a requested episode that would exceed the daily limit without counting an attempt", async () => {
+    const { store, ai, worker } = setup(["one"], { dailySec: 900 });
+    store.queueJob({ maxEpisodesPerSource: 0 });
+    await worker.pollOnce();
+    store.transcribedSeconds = 600;
+    const episode = store.episode("one");
+    store.queueJob({ sourceId: null, episodeId: episode.id });
+    await worker.pollOnce();
+    expect(store.episode("one")).toMatchObject({ status: "failed", error: BUDGET_EXCEEDED_MESSAGE, attempts: 0 });
+    expect(ai.transcribeEpisodeAudio).not.toHaveBeenCalled();
+  });
+
+  it("leaves automatic work pending when the daily limit is reached", async () => {
+    const { store, ai, worker } = setup(["one"], { dailySec: 300 });
+    store.queueJob({ maxEpisodesPerSource: 1 });
+    await worker.pollOnce();
+    expect(store.episode("one")).toMatchObject({ status: "pending", attempts: 0 });
+    expect(ai.transcribeEpisodeAudio).not.toHaveBeenCalled();
+  });
+
+  it("transcribes new episodes of a podcast with automatic transcription", async () => {
+    const guids = ["old"];
+    const { store, ai, worker } = setup(guids);
+    store.queueJob({ maxEpisodesPerSource: 0 });
+    await worker.pollOnce();
+    source.autoTranscribe = true;
+    store.autoTranscribeSince = store.clock;
+
+    // The next refresh finds one new episode.
+    guids.unshift("new");
+    store.queueJob({ maxEpisodesPerSource: 0 });
+    await worker.pollOnce();
+
+    expect(store.episode("new").status).toBe("ready");
+    expect(store.episode("old").status).toBe("pending");
+    expect(ai.transcribeEpisodeAudio).toHaveBeenCalledTimes(1);
+  });
+
+  it("queues due feed refreshes on every poll", async () => {
+    const { store, worker } = setup();
+    await worker.pollOnce();
+    expect(store.refreshIntervals).toEqual([3600]);
   });
 });

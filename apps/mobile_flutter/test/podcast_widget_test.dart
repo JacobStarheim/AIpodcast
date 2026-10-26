@@ -35,7 +35,7 @@ void main() {
     await _expectAccessibleButton(tester, citation, 'Listen from 2:00');
     await tester.tap(citation);
     await tester.pumpAndSettle();
-    expect(audio.lastEpisodeUrl, 'https://example.com/ep1.mp3');
+    expect(audio.lastEpisodeUrl, 'https://media.example/ep1.mp3');
     expect(audio.lastSeek, const Duration(seconds: 120));
     expect(tester.takeException(), isNull);
   });
@@ -323,7 +323,7 @@ void main() {
         tester, find.byKey(const ValueKey('play-episode')), 'Play episode');
     await tester.tap(find.byKey(const ValueKey('play-episode')));
     await tester.pumpAndSettle();
-    expect(audio.lastEpisodeUrl, 'https://example.com/ep1.mp3');
+    expect(audio.lastEpisodeUrl, 'https://media.example/ep1.mp3');
     expect(audio.lastSeek, Duration.zero);
     expect(tester.takeException(), isNull);
   });
@@ -517,7 +517,7 @@ void main() {
       await tester.ensureVisible(listen);
       await tester.tap(listen);
       await tester.pumpAndSettle();
-      expect(audio.lastEpisodeUrl, 'https://example.com/ep2.mp3');
+      expect(audio.lastEpisodeUrl, 'https://media.example/ep2.mp3');
       expect(find.text('Pause'), findsOneWidget,
           reason: 'the playing citation can be paused');
       expect(find.text('Playing: Episode ep2'), findsOneWidget);
@@ -545,6 +545,8 @@ void main() {
       await tester.tap(find.byTooltip('Browse episodes'));
       await tester.pumpAndSettle();
       expect(find.text('Not transcribed'), findsOneWidget);
+      await tester.scrollUntilVisible(find.text('Audio download failed'), 100,
+          scrollable: _sheetScrollable(find.byType(LibrarySheet)));
       expect(find.text('Transcription failed'), findsOneWidget);
       expect(find.text('Audio download failed'), findsOneWidget);
       expect(find.textContaining(' · 15 min'), findsNWidgets(3));

@@ -8,6 +8,11 @@ abstract class VoiceRecorder {
 }
 
 class RecordVoiceRecorder implements VoiceRecorder {
+  /// [onStopped] runs after each recording, e.g. to hand the audio session
+  /// back to playback (recording switches it to play-and-record on iOS).
+  RecordVoiceRecorder({this.onStopped});
+
+  final Future<void> Function()? onStopped;
   final AudioRecorder _recorder = AudioRecorder();
 
   @override
@@ -32,8 +37,12 @@ class RecordVoiceRecorder implements VoiceRecorder {
   }
 
   @override
-  Future<String?> stop() {
-    return _recorder.stop();
+  Future<String?> stop() async {
+    try {
+      return await _recorder.stop();
+    } finally {
+      await onStopped?.call();
+    }
   }
 
   @override

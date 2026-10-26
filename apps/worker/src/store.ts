@@ -14,15 +14,25 @@ export interface SourceRecord {
   id: string;
   name: string;
   rssUrl: string;
+  autoTranscribe: boolean;
 }
 
 export interface EpisodeRecord {
   id: string;
   sourceId: string;
+  sourceName: string;
   title: string;
+  description: string;
   audioUrl: string;
   status: TranscriptionStatus;
   durationSec: number | null;
+}
+
+/** The downloaded file that was transcribed, kept for playback. */
+export interface StoredAudio {
+  file: string;
+  mimeType: string;
+  bytes: number;
 }
 
 export interface SegmentToStore {
@@ -52,12 +62,26 @@ export interface WorkerStore {
 
   getActiveSources(sourceId: string | null): Promise<SourceRecord[]>;
   saveFeed(sourceId: string, feed: ParsedFeed): Promise<void>;
+  /** Queues an episode-list refresh for sources not read within the interval. */
+  enqueueDueRefreshes(intervalSec: number): Promise<number>;
+  /** New episodes of a source with automatic transcription, newest first. */
+  selectAutoTranscribeEpisodes(sourceId: string, limit: number, maxAttempts: number): Promise<EpisodeRecord[]>;
 
   getEpisode(episodeId: string): Promise<EpisodeRecord | null>;
   selectEpisodesToTranscribe(sourceId: string, limit: number, maxAttempts: number): Promise<EpisodeRecord[]>;
   /** Marks the episode processing and counts the attempt; false if it is not waiting. */
   startTranscription(episodeId: string): Promise<boolean>;
-  saveTranscript(episodeId: string, durationSec: number, segments: SegmentToStore[]): Promise<void>;
+  saveTranscript(
+    episodeId: string,
+    durationSec: number,
+    segments: SegmentToStore[],
+    audio: StoredAudio | null
+  ): Promise<void>;
+  /** Audio file of the episode's current transcript, if one was kept. */
+  getStoredAudioFile(episodeId: string): Promise<string | null>;
+  /** Seconds sent for transcription on the current UTC day. */
+  getTranscribedSecondsToday(): Promise<number>;
+  addTranscribedSeconds(seconds: number): Promise<void>;
   failTranscription(episodeId: string, error: string, options: { permanent: boolean; maxAttempts: number }): Promise<void>;
 
   selectEpisodesMissingSummary(sourceId: string, limit: number, maxAttempts: number): Promise<EpisodeRecord[]>;
@@ -77,14 +101,18 @@ function mapEpisode(row: Record<string, unknown>): EpisodeRecord {
   return {
     id: String(row.id),
     sourceId: String(row.source_id),
+    sourceName: String(row.source_name ?? ""),
     title: String(row.title),
+    description: String(row.description ?? ""),
     audioUrl: String(row.audio_url),
     status: String(row.transcription_status) as TranscriptionStatus,
     durationSec: row.duration_sec === null || row.duration_sec === undefined ? null : Number(row.duration_sec)
   };
 }
 
-const episodeColumns = "id, source_id, title, audio_url, transcription_status, duration_sec";
+const episodeColumns = `e.id, e.source_id, s.name AS source_name, e.title, e.description, e.audio_url,
+  e.transcription_status, e.duration_sec`;
+const episodeFrom = "episodes e JOIN rss_sources s ON s.id = e.source_id";
 
 export class PostgresWorkerStore implements WorkerStore {
   constructor(private readonly pool: Pool) {}
@@ -169,13 +197,18 @@ export class PostgresWorkerStore implements WorkerStore {
   async getActiveSources(sourceId: string | null): Promise<SourceRecord[]> {
     const result = sourceId
       ? await this.pool.query(
-          `SELECT id, name, rss_url FROM rss_sources WHERE id = $1 AND active = TRUE`,
+          `SELECT id, name, rss_url, auto_transcribe FROM rss_sources WHERE id = $1 AND active = TRUE`,
           [sourceId]
         )
       : await this.pool.query(
-          `SELECT id, name, rss_url FROM rss_sources WHERE active = TRUE ORDER BY created_at ASC`
+          `SELECT id, name, rss_url, auto_transcribe FROM rss_sources WHERE active = TRUE ORDER BY created_at ASC`
         );
-    return result.rows.map((row) => ({ id: String(row.id), name: String(row.name), rssUrl: String(row.rss_url) }));
+    return result.rows.map((row) => ({
+      id: String(row.id),
+      name: String(row.name),
+      rssUrl: String(row.rss_url),
+      autoTranscribe: Boolean(row.auto_transcribe)
+    }));
   }
 
   async saveFeed(sourceId: string, feed: ParsedFeed): Promise<void> {
@@ -183,7 +216,8 @@ export class PostgresWorkerStore implements WorkerStore {
       `UPDATE rss_sources
        SET name = CASE WHEN name = '' AND $2 <> '' THEN $2 ELSE name END,
            image_url = COALESCE(image_url, $3),
-           language = COALESCE($4, language)
+           language = COALESCE($4, language),
+           last_refreshed_at = NOW()
        WHERE id = $1`,
       [sourceId, feed.title.slice(0, 300), feed.imageUrl, feed.language]
     );
@@ -223,8 +257,39 @@ export class PostgresWorkerStore implements WorkerStore {
     );
   }
 
+  async enqueueDueRefreshes(intervalSec: number): Promise<number> {
+    const result = await this.pool.query(
+      `INSERT INTO ingest_jobs (source_id, max_episodes_per_source, status)
+       SELECT s.id, 0, 'queued'
+       FROM rss_sources s
+       WHERE s.active
+         AND COALESCE(s.last_refreshed_at, s.created_at) < NOW() - make_interval(secs => $1)
+         AND NOT EXISTS (
+           SELECT 1 FROM ingest_jobs j
+           WHERE j.source_id = s.id AND j.episode_id IS NULL AND j.status IN ('queued', 'processing')
+         )`,
+      [intervalSec]
+    );
+    return result.rowCount ?? 0;
+  }
+
+  async selectAutoTranscribeEpisodes(sourceId: string, limit: number, maxAttempts: number): Promise<EpisodeRecord[]> {
+    const result = await this.pool.query(
+      `SELECT ${episodeColumns}
+       FROM ${episodeFrom}
+       WHERE e.source_id = $1 AND s.auto_transcribe
+         AND e.first_seen_at >= s.auto_transcribe_since
+         AND e.transcription_status IN ('pending', 'failed')
+         AND e.transcription_attempts < $3
+       ORDER BY e.published_at DESC, e.id DESC
+       LIMIT $2`,
+      [sourceId, limit, maxAttempts]
+    );
+    return result.rows.map(mapEpisode);
+  }
+
   async getEpisode(episodeId: string): Promise<EpisodeRecord | null> {
-    const result = await this.pool.query(`SELECT ${episodeColumns} FROM episodes WHERE id = $1`, [episodeId]);
+    const result = await this.pool.query(`SELECT ${episodeColumns} FROM ${episodeFrom} WHERE e.id = $1`, [episodeId]);
     return result.rows[0] ? mapEpisode(result.rows[0]) : null;
   }
 
@@ -232,11 +297,11 @@ export class PostgresWorkerStore implements WorkerStore {
     if (limit <= 0) return [];
     const result = await this.pool.query(
       `SELECT ${episodeColumns}
-       FROM episodes
-       WHERE source_id = $1
-         AND transcription_status IN ('pending', 'queued', 'failed')
-         AND transcription_attempts < $3
-       ORDER BY published_at DESC, id DESC
+       FROM ${episodeFrom}
+       WHERE e.source_id = $1
+         AND e.transcription_status IN ('pending', 'queued', 'failed')
+         AND e.transcription_attempts < $3
+       ORDER BY e.published_at DESC, e.id DESC
        LIMIT $2`,
       [sourceId, limit, maxAttempts]
     );
@@ -256,7 +321,12 @@ export class PostgresWorkerStore implements WorkerStore {
     return (result.rowCount ?? 0) > 0;
   }
 
-  async saveTranscript(episodeId: string, durationSec: number, segments: SegmentToStore[]): Promise<void> {
+  async saveTranscript(
+    episodeId: string,
+    durationSec: number,
+    segments: SegmentToStore[],
+    audio: StoredAudio | null
+  ): Promise<void> {
     await this.transaction(async (client) => {
       await client.query(`DELETE FROM transcript_segments WHERE episode_id = $1`, [episodeId]);
       await client.query(`DELETE FROM episode_chapters WHERE episode_id = $1`, [episodeId]);
@@ -284,11 +354,34 @@ export class PostgresWorkerStore implements WorkerStore {
              transcription_error = NULL,
              duration_sec = COALESCE(duration_sec, $2),
              summary = NULL,
-             summary_attempts = 0
+             summary_attempts = 0,
+             audio_file = $3,
+             audio_mime = $4,
+             audio_bytes = $5
          WHERE id = $1`,
-        [episodeId, Math.round(durationSec)]
+        [episodeId, Math.round(durationSec), audio?.file ?? null, audio?.mimeType ?? null, audio?.bytes ?? null]
       );
     });
+  }
+
+  async getStoredAudioFile(episodeId: string): Promise<string | null> {
+    const result = await this.pool.query(`SELECT audio_file FROM episodes WHERE id = $1`, [episodeId]);
+    return result.rows[0]?.audio_file ? String(result.rows[0].audio_file) : null;
+  }
+
+  async getTranscribedSecondsToday(): Promise<number> {
+    const result = await this.pool.query(
+      `SELECT seconds FROM transcription_usage WHERE day = (NOW() AT TIME ZONE 'UTC')::date`
+    );
+    return Number(result.rows[0]?.seconds ?? 0);
+  }
+
+  async addTranscribedSeconds(seconds: number): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO transcription_usage (day, seconds) VALUES ((NOW() AT TIME ZONE 'UTC')::date, $1)
+       ON CONFLICT (day) DO UPDATE SET seconds = transcription_usage.seconds + EXCLUDED.seconds`,
+      [seconds]
+    );
   }
 
   async failTranscription(
@@ -310,10 +403,10 @@ export class PostgresWorkerStore implements WorkerStore {
   async selectEpisodesMissingSummary(sourceId: string, limit: number, maxAttempts: number): Promise<EpisodeRecord[]> {
     const result = await this.pool.query(
       `SELECT ${episodeColumns}
-       FROM episodes
-       WHERE source_id = $1 AND transcription_status = 'ready'
-         AND summary IS NULL AND summary_attempts < $3
-       ORDER BY published_at DESC, id DESC
+       FROM ${episodeFrom}
+       WHERE e.source_id = $1 AND e.transcription_status = 'ready'
+         AND e.summary IS NULL AND e.summary_attempts < $3
+       ORDER BY e.published_at DESC, e.id DESC
        LIMIT $2`,
       [sourceId, limit, maxAttempts]
     );

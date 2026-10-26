@@ -29,7 +29,8 @@ export interface TranscriptionResult {
 
 export interface WorkerAiClient {
   /** Splits the audio file into clips inside workDirectory and transcribes them. */
-  transcribeEpisodeAudio(input: { path: string; workDirectory: string }): Promise<TranscriptionResult>;
+  /** `prompt` carries names and titles as spelling hints. */
+  transcribeEpisodeAudio(input: { path: string; workDirectory: string; prompt?: string }): Promise<TranscriptionResult>;
   /** One embedding per text, in input order. */
   embedTexts(texts: string[]): Promise<number[][]>;
   summarizeTranscript(input: {
@@ -58,7 +59,11 @@ export class WorkerOpenAiClient implements WorkerAiClient {
     this.prepareAudio = dependencies.prepareAudio ?? prepareAudioChunks;
   }
 
-  async transcribeEpisodeAudio(input: { path: string; workDirectory: string }): Promise<TranscriptionResult> {
+  async transcribeEpisodeAudio(input: {
+    path: string;
+    workDirectory: string;
+    prompt?: string;
+  }): Promise<TranscriptionResult> {
     const prepared = await this.prepareAudio(input.path, input.workDirectory, this.config.audioChunkOptions);
     // Clips are independent requests; run several at once and keep their order.
     const texts = await mapWithConcurrency(
@@ -69,7 +74,8 @@ export class WorkerOpenAiClient implements WorkerAiClient {
         // gpt-transcribe returns text JSON, without word/segment timestamps.
         const response = await this.client.audio.transcriptions.create({
           model: this.config.transcribeModel,
-          file
+          file,
+          ...(input.prompt ? { prompt: input.prompt } : {})
         });
         return String(response.text ?? "").trim();
       }

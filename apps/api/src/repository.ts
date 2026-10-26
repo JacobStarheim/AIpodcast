@@ -6,11 +6,12 @@ import type {
   IngestJobStatus,
   Source,
   SourceSummary,
-  TranscriptionStatus
+  TranscriptionStatus,
+  User
 } from "@podcast/shared-types";
 import type { Pool, PoolClient } from "pg";
 import { HttpError } from "./security.js";
-import type { IngestJob, Repository, RetrievedSegment } from "./types.js";
+import type { IngestJob, LoginUser, Repository, RetrievedSegment } from "./types.js";
 
 interface CursorPayload {
   publishedAt: string;
@@ -60,12 +61,16 @@ const episodeSelect = `
   SELECT e.id, e.source_id, s.name AS source_name, s.rss_url AS source_rss_url, e.guid, e.title,
          e.description, e.published_at, e.audio_url, COALESCE(e.image_url, s.image_url) AS image_url,
          e.duration_sec, e.transcription_status, e.transcription_error,
-         COALESCE(e.language, s.language) AS language, e.summary
+         COALESCE(e.language, s.language) AS language, e.summary, e.audio_file IS NOT NULL AS has_audio
   FROM episodes e
   JOIN rss_sources s ON s.id = e.source_id`;
 
-function mapEpisodeSummary(row: Record<string, unknown>): EpisodeSummary {
+/** Signed URL for a stored audio file; see MediaSigner. */
+export type PlaybackUrlFor = (episodeId: string) => string;
+
+function mapEpisodeSummary(row: Record<string, unknown>, playbackUrlFor?: PlaybackUrlFor): EpisodeSummary {
   const status = String(row.transcription_status) as TranscriptionStatus;
+  const audioUrl = String(row.audio_url);
   return {
     id: String(row.id),
     sourceId: String(row.source_id),
@@ -73,7 +78,8 @@ function mapEpisodeSummary(row: Record<string, unknown>): EpisodeSummary {
     title: String(row.title),
     description: String(row.description ?? ""),
     publishedAt: iso(row.published_at),
-    audioUrl: String(row.audio_url),
+    audioUrl,
+    playbackUrl: row.has_audio && playbackUrlFor ? playbackUrlFor(String(row.id)) : audioUrl,
     imageUrl: nullableString(row.image_url),
     durationSec: nullableNumber(row.duration_sec),
     transcriptionStatus: status,
@@ -92,13 +98,14 @@ function mapSegment(row: Record<string, unknown>): RetrievedSegment {
     episodeTitle: String(row.episode_title),
     startSec: Number(row.start_sec),
     endSec: Number(row.end_sec),
+    playFromSec: Number(row.start_sec),
     text: String(row.text),
     score: row.score === undefined ? 0 : Number(row.score)
   };
 }
 
 const sourceSummarySelect = `
-  SELECT s.id, s.name, s.rss_url, s.image_url, s.created_at,
+  SELECT s.id, s.name, s.rss_url, s.image_url, s.created_at, s.auto_transcribe, s.last_refreshed_at,
          (SELECT COUNT(*) FROM episodes e WHERE e.source_id = s.id)::int AS episode_count,
          (SELECT COUNT(*) FROM episodes e
           WHERE e.source_id = s.id AND e.transcription_status = 'ready')::int AS ready_count,
@@ -118,6 +125,8 @@ function mapSourceSummary(row: Record<string, unknown>): SourceSummary {
     rssUrl: String(row.rss_url),
     imageUrl: nullableString(row.image_url),
     createdAt: iso(row.created_at),
+    autoTranscribe: Boolean(row.auto_transcribe),
+    lastRefreshedAt: row.last_refreshed_at ? iso(row.last_refreshed_at) : null,
     episodeCount: Number(row.episode_count),
     readyEpisodeCount: Number(row.ready_count),
     lastJob: row.job_status
@@ -134,8 +143,132 @@ function vectorLiteral(embedding: number[]): string {
   return `[${embedding.join(",")}]`;
 }
 
+function mapUser(row: Record<string, unknown>): User {
+  return {
+    id: String(row.id),
+    email: String(row.email),
+    name: String(row.name),
+    role: String(row.role) === "admin" ? "admin" : "user"
+  };
+}
+
 export class PostgresRepository implements Repository {
-  constructor(private readonly pool: Pool) {}
+  constructor(
+    private readonly pool: Pool,
+    private readonly playbackUrlFor?: PlaybackUrlFor
+  ) {}
+
+  private summary(row: Record<string, unknown>): EpisodeSummary {
+    return mapEpisodeSummary(row, this.playbackUrlFor);
+  }
+
+  async createUser(input: {
+    email: string;
+    name: string;
+    passwordHash: string;
+    role: User["role"];
+  }): Promise<User> {
+    try {
+      const result = await this.pool.query(
+        `INSERT INTO users (email, name, password_hash, role) VALUES ($1, $2, $3, $4)
+         RETURNING id, email, name, role`,
+        [input.email, input.name, input.passwordHash, input.role]
+      );
+      return mapUser(result.rows[0]);
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "23505") {
+        throw new HttpError(409, "a user with that email already exists");
+      }
+      throw error;
+    }
+  }
+
+  async findUserForLogin(email: string): Promise<LoginUser | null> {
+    const result = await this.pool.query(
+      `SELECT id, email, name, role, password_hash, disabled FROM users WHERE lower(email) = lower($1)`,
+      [email]
+    );
+    const row = result.rows[0];
+    return row ? { ...mapUser(row), passwordHash: String(row.password_hash), disabled: Boolean(row.disabled) } : null;
+  }
+
+  async createSession(input: { userId: string; tokenHash: string; expiresAt: Date }): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, $3)`,
+      [input.tokenHash, input.userId, input.expiresAt]
+    );
+  }
+
+  async findSessionUser(tokenHash: string): Promise<User | null> {
+    // Updating last_used_at at most every five minutes keeps reads cheap.
+    const result = await this.pool.query(
+      `WITH session AS (
+         SELECT s.token_hash, u.id, u.email, u.name, u.role
+         FROM sessions s JOIN users u ON u.id = s.user_id
+         WHERE s.token_hash = $1 AND s.expires_at > NOW() AND NOT u.disabled
+       ), touched AS (
+         UPDATE sessions SET last_used_at = NOW()
+         WHERE token_hash = (SELECT token_hash FROM session) AND last_used_at < NOW() - INTERVAL '5 minutes'
+       )
+       SELECT id, email, name, role FROM session`,
+      [tokenHash]
+    );
+    return result.rows[0] ? mapUser(result.rows[0]) : null;
+  }
+
+  async deleteSession(tokenHash: string): Promise<void> {
+    await this.pool.query(`DELETE FROM sessions WHERE token_hash = $1`, [tokenHash]);
+  }
+
+  async getTranscribedSecondsToday(): Promise<number> {
+    const result = await this.pool.query(
+      `SELECT seconds FROM transcription_usage WHERE day = (NOW() AT TIME ZONE 'UTC')::date`
+    );
+    return Number(result.rows[0]?.seconds ?? 0);
+  }
+
+  async updateSource(sourceId: string, input: { autoTranscribe: boolean }): Promise<SourceSummary | null> {
+    // Turning it on counts only episodes found from now on as new.
+    const updated = await this.pool.query(
+      `UPDATE rss_sources
+       SET auto_transcribe = $2,
+           auto_transcribe_since = CASE WHEN $2 AND NOT auto_transcribe THEN NOW() ELSE auto_transcribe_since END
+       WHERE id = $1 AND active
+       RETURNING id`,
+      [sourceId, input.autoTranscribe]
+    );
+    if (updated.rowCount === 0) return null;
+    const result = await this.pool.query(`${sourceSummarySelect} WHERE s.id = $1`, [sourceId]);
+    return mapSourceSummary(result.rows[0]);
+  }
+
+  async retranscribeEpisode(episodeId: string): Promise<{ jobId: string } | null> {
+    return this.inTransaction(async (client) => {
+      const episode = await client.query(
+        `UPDATE episodes SET transcription_status = 'queued', transcription_error = NULL
+         WHERE id = $1 AND transcription_status <> 'processing'
+         RETURNING source_id`,
+        [episodeId]
+      );
+      const sourceId = episode.rows[0]?.source_id;
+      if (!sourceId) return null;
+      const job = await client.query(
+        `INSERT INTO ingest_jobs (source_id, episode_id, max_episodes_per_source, status)
+         VALUES ($1, $2, 1, 'queued') RETURNING id`,
+        [sourceId, episodeId]
+      );
+      return { jobId: String(job.rows[0].id) };
+    });
+  }
+
+  async getEpisodeAudio(episodeId: string): Promise<{ file: string; mimeType: string } | null> {
+    const result = await this.pool.query(
+      `SELECT audio_file, audio_mime FROM episodes WHERE id = $1 AND audio_file IS NOT NULL`,
+      [episodeId]
+    );
+    const row = result.rows[0];
+    return row ? { file: String(row.audio_file), mimeType: String(row.audio_mime ?? "audio/mpeg") } : null;
+  }
 
   private async inTransaction<T>(work: (client: PoolClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
@@ -271,7 +404,7 @@ export class PostgresRepository implements Repository {
 
     const hasMore = result.rows.length > input.limit;
     const rows = hasMore ? result.rows.slice(0, input.limit) : result.rows;
-    const items = rows.map(mapEpisodeSummary);
+    const items = rows.map((row) => this.summary(row));
 
     const nextCursor = hasMore
       ? encodeCursor({
@@ -295,7 +428,7 @@ export class PostgresRepository implements Repository {
       [episodeId]
     );
     return {
-      ...mapEpisodeSummary(row),
+      ...this.summary(row),
       guid: String(row.guid),
       language: nullableString(row.language),
       summary: nullableString(row.summary),
@@ -331,7 +464,7 @@ export class PostgresRepository implements Repository {
     });
     if (jobId === undefined) return null;
     const episode = await this.pool.query(`${episodeSelect} WHERE e.id = $1`, [episodeId]);
-    return { episode: mapEpisodeSummary(episode.rows[0]), jobId };
+    return { episode: this.summary(episode.rows[0]), jobId };
   }
 
   async listReadyLanguages(): Promise<string[]> {
@@ -339,7 +472,7 @@ export class PostgresRepository implements Repository {
       `SELECT COALESCE(e.language, s.language) AS language, COUNT(*) AS episodes
        FROM episodes e JOIN rss_sources s ON s.id = e.source_id
        WHERE e.transcription_status = 'ready' AND COALESCE(e.language, s.language) IS NOT NULL
-       GROUP BY 1 ORDER BY 2 DESC LIMIT 5`
+       GROUP BY 1 ORDER BY 2 DESC, 1 ASC LIMIT 5`
     );
     return result.rows.map((row) => String(row.language));
   }
@@ -386,7 +519,8 @@ export class PostgresRepository implements Repository {
     topK: number;
   }): Promise<RetrievedSegment[]> {
     if (input.terms.length === 0) return [];
-    const params: unknown[] = [input.terms.join(" | ")];
+    // Terms are stem prefixes: match any word starting with them.
+    const params: unknown[] = [input.terms.map((term) => `${term}:*`).join(" | ")];
     let where = "WHERE ts.search_tsv @@ query AND e.transcription_status = 'ready'";
     if (input.episodeId) {
       params.push(input.episodeId);
@@ -474,6 +608,7 @@ export class PostgresRepository implements Repository {
       episodeTitle: String(row.episode_title),
       startSec: Number(row.start_sec),
       endSec: Number(row.end_sec),
+      playFromSec: Number(row.start_sec),
       text: `${String(row.title)}: ${String(row.summary)}`,
       score: Number(row.score)
     }));

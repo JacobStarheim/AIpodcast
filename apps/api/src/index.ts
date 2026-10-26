@@ -2,7 +2,9 @@ import { createServer } from "node:http";
 import { loadConfig } from "./config.js";
 import { assertSchemaVersion, createPool } from "./db.js";
 import { OpenAiClient } from "./ai-client.js";
+import { MediaSigner } from "./media.js";
 import { ItunesPodcastDirectory } from "./podcast-directory.js";
+import { PostgresRateLimitStore, RateLimiter } from "./rate-limit.js";
 import { PostgresRepository } from "./repository.js";
 import { createApp } from "./app.js";
 
@@ -10,7 +12,8 @@ async function start() {
   const config = loadConfig();
   const pool = createPool(config.databaseUrl);
   await assertSchemaVersion(pool);
-  const repository = new PostgresRepository(pool);
+  const mediaSigner = new MediaSigner(config.mediaUrlSecret, config.publicBaseUrl);
+  const repository = new PostgresRepository(pool, (episodeId) => mediaSigner.url(episodeId));
   const aiClient = new OpenAiClient({
     apiKey: config.openAiApiKey,
     transcribeModel: config.transcribeModel,
@@ -29,7 +32,11 @@ async function start() {
     minGroundingScore: config.minGroundingScore,
     podcastSearchCountry: config.podcastSearchCountry,
     corsOrigins: config.corsOrigins,
-    trustProxy: config.trustProxy
+    trustProxy: config.trustProxy,
+    rateLimiter: new RateLimiter(new PostgresRateLimitStore(pool)),
+    mediaSigner,
+    audioStorageDirectory: config.audioStorageDirectory,
+    dailyTranscriptionSec: config.dailyTranscriptionSec
   });
 
   const server = createServer(app);

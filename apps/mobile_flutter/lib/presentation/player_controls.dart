@@ -25,7 +25,7 @@ class _PlaybackProgressBarState extends State<PlaybackProgressBar> {
   Widget build(BuildContext context) {
     final controller = widget.controller;
     final hasAudio =
-        controller.selectedEpisode?.episode.audioUrl.isNotEmpty ?? false;
+        controller.selectedEpisode?.episode.playbackUrl.isNotEmpty ?? false;
     return ValueListenableBuilder<PlaybackProgress>(
       valueListenable: controller.selectedProgress,
       builder: (context, progress, _) {

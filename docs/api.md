@@ -5,16 +5,34 @@ All paths are relative to the API origin (default `http://localhost:4000`).
 
 ## Authentication
 
-Every route except `GET /health` requires the app key:
+Users sign in with email and password and send the returned session token on
+every request except `GET /health`, `POST /v1/auth/login` and the signed media
+URLs:
 
 ```
-Authorization: Bearer <APP_API_KEY>
+Authorization: Bearer <token>
 ```
 
-`APP_API_KEY` is set in `apps/api/.env`. The Flutter app receives it with
-`--dart-define=API_KEY=...`; debug builds default to `dev-app-key`, which matches
-the example environment. This is a shared app key for a prototype, not per-user
-accounts. Admin routes (`/v1/admin/*`) use `x-admin-key: <ADMIN_KEY>` instead.
+Accounts are created by an administrator (`npm run user:create` or
+`POST /v1/admin/users`); there is no public sign-up. Sessions last 30 days.
+A request with a missing, expired or revoked token gets `401`.
+
+`APP_API_KEY` is optional. When it is set, it is also accepted as a bearer
+token, for scripts such as the smoke test and the eval runner; keep it secret
+or leave it unset. Admin routes (`/v1/admin/*`) use `x-admin-key: <ADMIN_KEY>`.
+
+### `POST /v1/auth/login`
+
+Body `LoginRequest`. Returns `LoginResponse`, or `401` with
+`invalid email or password`. Limited to 10 attempts per 15 minutes per client.
+
+### `POST /v1/auth/logout`
+
+Revokes the current session token. Returns `204`.
+
+### `GET /v1/me`
+
+Returns the signed-in `User`.
 
 ## Errors and limits
 
@@ -27,10 +45,11 @@ Errors use `{ "error": string, "requestId"?: string }`.
 | 404 | Unknown episode or source. |
 | 409 | Episode is not ready for questions. |
 | 413 | Uploaded audio is too large (25 MB). |
-| 429 | Rate limit reached; `Retry-After` gives seconds to wait. |
+| 429 | Rate limit reached; `Retry-After` gives seconds to wait. With `code: "transcription_budget_exceeded"` the daily transcription limit is used up. |
 | 500 | Internal failure. Details are logged by the API under `requestId`, never returned. |
 
-Rate limits per client (key and IP) are fixed windows:
+Rate limits are fixed windows per signed-in user (per IP for login), stored
+in PostgreSQL so several API processes share them:
 
 | Routes | Limit |
 | --- | --- |
@@ -53,6 +72,12 @@ with up to 15 results that have an RSS feed.
 Returns `SourceListResponse`: the podcasts in the library, episode counts and
 the latest import job. `lastJob.status = "failed"` with `lastJob.error`
 explains a feed that could not be imported.
+
+### `PATCH /v1/sources/:id`
+
+Body `UpdateSourceRequest`. With `autoTranscribe: true`, episodes that the
+periodic feed refresh finds from now on are transcribed automatically, within
+the daily limit. Returns the updated `SourceSummary`.
 
 ### `POST /v1/sources`
 
@@ -82,7 +107,28 @@ already `ready`, `queued` or `processing` returns `200` with `jobId: null` and
 does nothing. A `failed` episode can be requested again.
 
 Poll `GET /v1/episodes/:id` until `transcriptionStatus` is `ready` or `failed`.
-A one-hour episode usually takes a few minutes.
+A one-hour episode usually takes about two minutes.
+
+Transcription has a daily limit in audio minutes (`DAILY_TRANSCRIPTION_MINUTES`,
+default 180, shared by all users). A request that would exceed it gets `429`
+with `code: "transcription_budget_exceeded"`.
+
+### `GET /v1/usage`
+
+Returns `UsageResponse`: transcription minutes used today (UTC) and the limit.
+
+### Playback and `playbackUrl`
+
+Every episode has `playbackUrl`. For transcribed episodes it points to the
+exact audio file that was transcribed, served by
+`GET /v1/media/episodes/:id?exp=<unix>&sig=<hmac>` with HTTP Range support and
+no `Authorization` header (the signature authorizes it; links expire after 12
+hours, so refresh the episode before then). Otherwise it equals `audioUrl`. A
+relative `playbackUrl` is relative to the API origin.
+
+Play `playbackUrl`, not `audioUrl`: many podcasts insert ads dynamically, so
+two downloads of `audioUrl` can differ by many seconds and transcript times
+would not match.
 
 ## Questions
 
@@ -103,14 +149,32 @@ Body `QARequest`:
   and after it.
 
 Returns `QAResponse`. Citations have `kind: "segment"` (a transcript passage)
-or `kind: "chapter"` (a chapter from the episode summary). Both carry
-`startSec`, so the client can play from there. When the evidence is
+or `kind: "chapter"` (a chapter from the episode summary). `playFromSec` is the
+estimated start of the cited sentence (a second or two early); play from there.
+Refusals are written in the language of the question. When the evidence is
 insufficient, `grounded` is `false`, `citations` is empty and `refusalReason`
 is `insufficient_retrieval_confidence` or `insufficient_grounded_citations`.
 
+### `POST /v1/qa/answer/stream`
+
+Same body as `/v1/qa/answer`. Responds with `text/event-stream`; every event is
+one `data: <QAStreamEvent JSON>` line followed by a blank line:
+
+1. `{"type":"status","stage":"searching"}`, then `{"type":"status","stage":"answering"}`.
+2. Zero or more `{"type":"delta","text":"..."}` with the answer text as it is
+   written.
+3. Exactly one final `{"type":"done","response":QAResponse}` or
+   `{"type":"error","error":"..."}`.
+
+The `done` response is authoritative: it may be a refusal even after deltas were
+sent (for example when the answer cited nothing valid), so replace the streamed
+text with it. Validation errors before streaming starts use normal JSON errors.
+
 ### `POST /v1/voice/transcribe`
 
-Multipart form with an `audio` file (max 25 MB). Returns
+Multipart form with an `audio` file (max 25 MB) and an optional `episodeId`
+field. With `episodeId`, names from that episode (description and chapters) are
+passed to the transcription model as spelling hints. Returns
 `{ "text": string, "durationMs": number }`.
 
 ### `POST /v1/voice/synthesize`
@@ -120,7 +184,13 @@ Body `{ "text": string }` (at most 6000 characters). Returns
 
 ## Admin
 
-Both routes require `x-admin-key`.
+These routes require `x-admin-key`.
+
+- `POST /v1/admin/users` with `{ "email", "name", "password", "role"? }`
+  creates an account (`role` defaults to `user`; passwords need 10+ characters).
+- `POST /v1/admin/episodes/:id/retranscribe` transcribes an episode again, for
+  example after improving name hints. The episode is unavailable for questions
+  until it is ready again.
 
 - `POST /v1/admin/sources` with `{ "name", "rssUrl" }` creates a source.
 - `POST /v1/admin/ingest/run` with `{ "sourceId"?, "maxEpisodesPerSource"? }`

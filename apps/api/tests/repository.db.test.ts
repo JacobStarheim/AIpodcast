@@ -1,6 +1,8 @@
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { assertSchemaVersion } from "../src/db.js";
+import { hashToken } from "../src/auth.js";
+import { PostgresRateLimitStore } from "../src/rate-limit.js";
 import { PostgresRepository } from "../src/repository.js";
 
 // Runs against a real, migrated database: `npm run test:db` from the repository root.
@@ -20,7 +22,7 @@ describe.runIf(databaseUrl)("PostgresRepository against PostgreSQL", () => {
 
   beforeAll(async () => {
     pool = new pg.Pool({ connectionString: databaseUrl, max: 4 });
-    repository = new PostgresRepository(pool);
+    repository = new PostgresRepository(pool, (episodeId) => `/signed/${episodeId}`);
     await assertSchemaVersion(pool);
   });
 
@@ -29,7 +31,8 @@ describe.runIf(databaseUrl)("PostgresRepository against PostgreSQL", () => {
   });
 
   beforeEach(async () => {
-    await pool.query("TRUNCATE rss_sources, episodes, transcript_segments, episode_chapters, ingest_jobs, qa_events CASCADE");
+    await pool.query(`TRUNCATE rss_sources, episodes, transcript_segments, episode_chapters, ingest_jobs, qa_events,
+      users, sessions, rate_limits, transcription_usage CASCADE`);
     sourceId = (await pool.query(
       `INSERT INTO rss_sources (name, rss_url, image_url, language)
        VALUES ('Show', 'https://feeds.test/show', 'https://cdn.test/show.jpg', 'en') RETURNING id`
@@ -168,5 +171,62 @@ describe.runIf(databaseUrl)("PostgresRepository against PostgreSQL", () => {
     expect(job.rows).toEqual([{ source_id: sourceId, episode_id: pendingId, status: "queued" }]);
     // Episode jobs do not count as the source's latest import.
     expect((await repository.listSources())[0]?.lastJob).toBeNull();
+  });
+
+  it("creates users with unique emails and resolves only valid sessions", async () => {
+    const user = await repository.createUser({ email: "Ada@Example.com", name: "Ada", passwordHash: "scrypt$x", role: "user" });
+    await expect(repository.createUser({ email: "ada@example.com", name: "Again", passwordHash: "h", role: "user" }))
+      .rejects.toMatchObject({ status: 409 });
+    expect(await repository.findUserForLogin("ADA@example.com")).toMatchObject({ id: user.id, passwordHash: "scrypt$x", disabled: false });
+
+    await repository.createSession({ userId: user.id, tokenHash: hashToken("good"), expiresAt: new Date(Date.now() + 60_000) });
+    await repository.createSession({ userId: user.id, tokenHash: hashToken("old"), expiresAt: new Date(Date.now() - 60_000) });
+    expect(await repository.findSessionUser(hashToken("good"))).toEqual({ id: user.id, email: "Ada@Example.com", name: "Ada", role: "user" });
+    expect(await repository.findSessionUser(hashToken("old"))).toBeNull();
+    expect(await repository.findSessionUser(hashToken("missing"))).toBeNull();
+
+    await pool.query("UPDATE users SET disabled = TRUE WHERE id = $1", [user.id]);
+    expect(await repository.findSessionUser(hashToken("good"))).toBeNull();
+    await pool.query("UPDATE users SET disabled = FALSE WHERE id = $1", [user.id]);
+    await repository.deleteSession(hashToken("good"));
+    expect(await repository.findSessionUser(hashToken("good"))).toBeNull();
+  });
+
+  it("links stored audio and reports usage", async () => {
+    await pool.query("UPDATE episodes SET audio_file = id || '.mp3', audio_mime = 'audio/mpeg' WHERE id = $1", [readyId]);
+    const episodes = await repository.listEpisodes({ limit: 10 });
+    expect(episodes.items.find((item) => item.id === readyId)?.playbackUrl).toBe(`/signed/${readyId}`);
+    expect(episodes.items.find((item) => item.id === otherReadyId)?.playbackUrl).toBe("https://cdn.test/a.mp3");
+    expect(await repository.getEpisodeAudio(readyId)).toEqual({ file: `${readyId}.mp3`, mimeType: "audio/mpeg" });
+    expect(await repository.getEpisodeAudio(otherReadyId)).toBeNull();
+
+    expect(await repository.getTranscribedSecondsToday()).toBe(0);
+    await pool.query("INSERT INTO transcription_usage (day, seconds) VALUES ((NOW() AT TIME ZONE 'UTC')::date, 90)");
+    expect(await repository.getTranscribedSecondsToday()).toBe(90);
+  });
+
+  it("turns on automatic transcription from now on and re-queues ready episodes", async () => {
+    const turnedOn = await repository.updateSource(sourceId, { autoTranscribe: true });
+    expect(turnedOn).toMatchObject({ autoTranscribe: true, lastRefreshedAt: null });
+    const since = (await pool.query("SELECT auto_transcribe_since FROM rss_sources")).rows[0].auto_transcribe_since;
+    expect(since).not.toBeNull();
+    await repository.updateSource(sourceId, { autoTranscribe: true });
+    expect((await pool.query("SELECT auto_transcribe_since FROM rss_sources")).rows[0].auto_transcribe_since).toEqual(since);
+    expect(await repository.updateSource("44444444-4444-4444-8444-444444444444", { autoTranscribe: true })).toBeNull();
+
+    const queued = await repository.retranscribeEpisode(readyId);
+    expect(queued?.jobId).toEqual(expect.any(String));
+    const status = await pool.query("SELECT transcription_status FROM episodes WHERE id = $1", [readyId]);
+    expect(status.rows[0].transcription_status).toBe("queued");
+  });
+
+  it("counts requests per window in a shared table", async () => {
+    const store = new PostgresRateLimitStore(pool);
+    const first = await store.hit("qa:user-1", 60_000);
+    const second = await store.hit("qa:user-1", 60_000);
+    const other = await store.hit("qa:user-2", 60_000);
+    expect([first.count, second.count, other.count]).toEqual([1, 2, 1]);
+    expect(second.resetAt).toBe(first.resetAt);
+    expect(first.resetAt - Date.now()).toBeLessThanOrEqual(60_000);
   });
 });

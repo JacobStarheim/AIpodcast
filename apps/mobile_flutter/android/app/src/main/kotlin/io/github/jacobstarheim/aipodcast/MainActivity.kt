@@ -1,5 +1,7 @@
 package io.github.jacobstarheim.aipodcast
 
-import io.flutter.embedding.android.FlutterActivity
+import com.ryanheise.audioservice.AudioServiceActivity
 
-class MainActivity : FlutterActivity()
+// Shares its Flutter engine with the background playback service
+// (audio_service), so lock screen controls reach the running app.
+class MainActivity : AudioServiceActivity()

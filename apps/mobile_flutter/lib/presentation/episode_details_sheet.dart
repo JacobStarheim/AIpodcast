@@ -65,7 +65,7 @@ class EpisodeDetailsSheet extends StatelessWidget {
                       _ChapterTile(
                         chapter: chapter,
                         onTap: controller.canControlPlayback &&
-                                episode.audioUrl.isNotEmpty
+                                episode.playbackUrl.isNotEmpty
                             ? () {
                                 controller.playSelectedEpisodeFrom(Duration(
                                     milliseconds:
