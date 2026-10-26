@@ -60,8 +60,8 @@ CREATE INDEX IF NOT EXISTS idx_episodes_source_published_desc
 CREATE INDEX IF NOT EXISTS idx_transcript_segments_episode
   ON transcript_segments(episode_id);
 
-CREATE INDEX IF NOT EXISTS idx_transcript_segments_embedding
-  ON transcript_segments USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+-- The original schema also created an ivfflat index on the empty table here.
+-- 002 replaces it with HNSW, so new databases skip it.
 
 CREATE OR REPLACE FUNCTION set_updated_at()
 RETURNS TRIGGER AS $$

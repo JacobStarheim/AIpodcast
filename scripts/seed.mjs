@@ -9,8 +9,8 @@ const apiOrigin = process.env.API_BASE_URL || "http://localhost:4000";
 const rssUrl = process.env.RSS_URL || "https://feeds.simplecast.com/54nAGcIl";
 const name = process.env.SOURCE_NAME || "Podcast source";
 const maxEpisodes = Number(process.env.MAX_EPISODES || "1");
-if (!adminKey || !Number.isInteger(maxEpisodes) || maxEpisodes < 1 || maxEpisodes > 100) {
-  throw new Error("Set ADMIN_KEY in apps/api/.env and MAX_EPISODES to an integer between 1 and 100.");
+if (!adminKey || !Number.isInteger(maxEpisodes) || maxEpisodes < 0 || maxEpisodes > 100) {
+  throw new Error("Set ADMIN_KEY in apps/api/.env and MAX_EPISODES to an integer between 0 and 100.");
 }
 for (const url of [apiOrigin, rssUrl]) {
   if (!["http:", "https:"].includes(new URL(url).protocol)) {

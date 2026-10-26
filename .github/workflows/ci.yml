@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend build, tests and database tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: podcast
+          POSTGRES_PASSWORD: podcast
+          POSTGRES_DB: podcast_ai
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U podcast -d podcast_ai"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://podcast:podcast@localhost:5432/podcast_ai
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - run: npm ci
+      - run: npm run build
+      - name: Migration files match SCHEMA_VERSION
+        run: |
+          latest=$(ls infrastructure/migrations | sort | tail -n 1 | cut -c1-3)
+          expected=$(node --input-type=module -e "const m = await import('./packages/shared-types/dist/index.js'); console.log(m.SCHEMA_VERSION)")
+          echo "latest migration $latest, SCHEMA_VERSION $expected"
+          test "$latest" = "$expected"
+      - name: Unit tests
+        run: npm test
+      - name: Migrations and database tests
+        run: npm run test:db
+
+  mobile:
+    name: Flutter analyze and tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/mobile_flutter
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test

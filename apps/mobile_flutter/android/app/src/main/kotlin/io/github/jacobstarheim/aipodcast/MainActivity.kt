@@ -1,4 +1,4 @@
-package com.example.podcast
+package io.github.jacobstarheim.aipodcast
 
 import io.flutter.embedding.android.FlutterActivity
 

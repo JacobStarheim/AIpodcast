@@ -72,3 +72,36 @@ export function chunkTranscriptSegments(
 
   return chunks;
 }
+
+function tail(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const cut = text.slice(-maxChars);
+  if (text[text.length - maxChars - 1] === " ") return cut;
+  const space = cut.indexOf(" ");
+  return space >= 0 ? cut.slice(space + 1) : cut;
+}
+
+function head(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const cut = text.slice(0, maxChars);
+  if (text[maxChars] === " ") return cut;
+  const space = cut.lastIndexOf(" ");
+  return space >= 0 ? cut.slice(0, space) : cut;
+}
+
+/**
+ * The text embedded for each chunk: the chunk plus the end of the previous one
+ * and the start of the next. A topic that spans a cut is then still found, while
+ * citations keep the chunk's own times and text.
+ */
+export function buildContextTexts(chunks: { text: string }[], neighbourChars = 300): string[] {
+  return chunks.map((chunk, index) => {
+    const previous = chunks[index - 1];
+    const next = chunks[index + 1];
+    return [
+      previous ? tail(previous.text, neighbourChars) : "",
+      chunk.text,
+      next ? head(next.text, neighbourChars) : ""
+    ].filter(Boolean).join("\n");
+  });
+}

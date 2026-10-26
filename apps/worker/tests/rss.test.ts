@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { parseRss } from "../src/rss.js";
+import { parseFeed, parseRss } from "../src/rss.js";
 
 const sampleRss = `
 <rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd">
   <channel>
     <title>Demo Podcast</title>
+    <language>nb-no</language>
+    <itunes:image href="https://example.com/show.jpg" />
     <item>
       <guid>episode-1</guid>
       <title>Episode One</title>
@@ -26,6 +28,7 @@ const sampleRss = `
       <description>Second episode</description>
       <pubDate>Tue, 02 Jan 2024 10:00:00 GMT</pubDate>
       <enclosure url="https://example.com/e2.mp3" type="audio/mpeg" />
+      <itunes:image href="https://example.com/e2.jpg" />
       <itunes:duration>630</itunes:duration>
     </item>
   </channel>
@@ -40,5 +43,24 @@ describe("parseRss", () => {
     expect(episodes[0]?.guid).toBe("episode-2");
     expect(episodes[1]?.guid).toBe("episode-1");
     expect(episodes[1]?.durationSec).toBe(605);
+  });
+});
+
+describe("parseFeed", () => {
+  it("reads the show title, language and artwork", () => {
+    const feed = parseFeed(sampleRss);
+    expect(feed).toMatchObject({
+      title: "Demo Podcast",
+      language: "nb-no",
+      imageUrl: "https://example.com/show.jpg"
+    });
+    expect(feed.episodes[0]?.imageUrl).toBe("https://example.com/e2.jpg");
+    expect(feed.episodes[1]?.imageUrl).toBeNull();
+  });
+
+  it("ignores an invalid language and non-HTTP artwork", () => {
+    const feed = parseFeed(`<rss><channel><title>X</title><language>Norwegian Bokmal</language>
+      <image><url>javascript:alert(1)</url></image></channel></rss>`);
+    expect(feed).toMatchObject({ language: null, imageUrl: null, episodes: [] });
   });
 });

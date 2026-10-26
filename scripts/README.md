@@ -6,7 +6,8 @@ inserts a transcript, or writes embeddings directly.
 
 Prerequisites: Node dependencies installed, macOS `say`, `ffmpeg` and `ffprobe`,
 running PostgreSQL/API/worker, and configured `apps/api/.env` and
-`apps/worker/.env`. Run from the repository root:
+`apps/worker/.env`. The worker must allow the loopback demo feed with
+`ALLOW_PRIVATE_NETWORK_FEEDS=true`. Run from the repository root:
 
 ```bash
 # Terminal 1: generates local speech assets once and keeps serving them.
@@ -51,9 +52,21 @@ only.
 
 Optional variables: `API_BASE_URL`, `DEMO_PORT`, `DEMO_BASE_URL`, `DEMO_VOICE`
 (defaults to Samantha), `FFMPEG_PATH`, and `FFPROBE_PATH`. The API base and demo
-base must be plain loopback HTTP origins. `ADMIN_KEY` and `DATABASE_URL` are read
-from the API environment file unless overridden in the shell; values are never
-printed. Model configuration comes from the running services.
+base must be plain loopback HTTP origins. `ADMIN_KEY`, `APP_API_KEY` and
+`DATABASE_URL` are read from the API environment file unless overridden in the
+shell; values are never printed. Model configuration comes from the running services.
 The demo server binds IPv4 loopback, so `DEMO_BASE_URL` must use `127.0.0.1` or
 `localhost`. When `DEMO_PORT` is omitted, the server derives its port from
 `DEMO_BASE_URL`; when both are specified, their ports must match.
+
+## Other scripts
+
+- `migrate.mjs` (`npm run db:migrate`): applies pending files from
+  `infrastructure/migrations`, each in a transaction, recorded in
+  `schema_migrations`. Uses `DATABASE_URL`, else the API environment file.
+- `test-db.mjs` (`npm run test:db`): recreates a `podcast_ai_test` database on the
+  same server, migrates it twice, and runs all workspace tests with
+  `TEST_DATABASE_URL` set so the `*.db.test.ts` suites run. Set
+  `TEST_DATABASE_SERVER_URL` to use another server.
+- `seed.mjs` (`npm run seed`): adds an RSS source through the admin API and
+  queues an import of `MAX_EPISODES` episodes (0 imports only the episode list).
