@@ -113,3 +113,6 @@ application ID changed to `io.github.jacobstarheim.aipodcast`.
   transcription quality across arbitrary podcast feeds, languages, or recordings.
 - Citations identify clips of 10–30 seconds rather than individual words.
 - Rate limits are per API process and per client address; the app key is shared.
+- Spoken answers are rejected when the Realtime model does not read the text
+  verbatim. In one of four live runs the Norwegian speech check failed this way
+  ("Generated speech did not match the supplied answer") and passed on rerun.
