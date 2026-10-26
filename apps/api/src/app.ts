@@ -227,7 +227,9 @@ export function createApp(input: {
     }
     const topK = typeof req.body?.topK === "number" && Number.isFinite(req.body.topK)
       ? clamp(Math.floor(req.body.topK), 1, 12)
-      : 6;
+      // 10 answered every question in scripts/eval/datasets/hard-fork-holmes.json;
+      // 6 missed passages in a one-hour conversation, at the same latency.
+      : 10;
 
     res.json(await answerQuestion(
       { repository: input.repository, aiClient: input.aiClient, minGroundingScore: input.minGroundingScore,

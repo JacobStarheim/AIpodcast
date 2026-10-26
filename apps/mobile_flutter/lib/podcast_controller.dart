@@ -102,7 +102,8 @@ class PodcastController extends ChangeNotifier {
 
   /// Earlier grounded turns sent with a follow-up question.
   static const historyLimit = 6;
-  static const topK = 6;
+  /// Passages retrieved per question; matches the API default.
+  static const topK = 10;
 
   /// Positions this close to the end count as finished.
   static const finishedMargin = Duration(seconds: 5);

@@ -170,7 +170,7 @@ void main() {
       final api = apiWith(MockClient((request) async {
         expect(jsonDecode(request.body), {
           'questionText': 'Unanswerable question',
-          'topK': 6,
+          'topK': 10,
         });
         return _jsonResponse({
           'answerText': 'There is not enough evidence.',
@@ -509,7 +509,7 @@ void main() {
       final api = apiWith(MockClient((request) async {
         expect(jsonDecode(request.body), {
           'questionText': 'And what did she mean?',
-          'topK': 6,
+          'topK': 10,
           'episodeId': 'ep1',
           'positionSec': 754.5,
           'history': [
@@ -544,7 +544,7 @@ void main() {
 
     test('never sends a position without an episode', () async {
       final api = apiWith(MockClient((request) async {
-        expect(jsonDecode(request.body), {'questionText': 'Q?', 'topK': 6});
+        expect(jsonDecode(request.body), {'questionText': 'Q?', 'topK': 10});
         return _jsonResponse({'answerText': '', 'grounded': false});
       }));
       await api.askQuestion(questionText: 'Q?', positionSec: 12);

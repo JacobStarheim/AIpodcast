@@ -187,7 +187,7 @@ void main() {
       expect(controller.latestResponse, isNull);
       await Future<void>.delayed(Duration.zero);
       expect(api.lastQuestionText, controller.lastQuestionText);
-      expect(api.lastTopK, 6);
+      expect(api.lastTopK, 10);
       api.questionGate!.complete();
       await answer;
       expect(controller.pendingQuestion, isNull);

@@ -161,6 +161,13 @@ export class FakeRepository implements Repository {
     return this.recentSegments;
   }
 
+  neighbours: RetrievedSegment[] = [];
+
+  /** Returns the hits followed by any configured neighbour passages. */
+  async withNeighbours(hits: RetrievedSegment[]): Promise<RetrievedSegment[]> {
+    return [...hits, ...this.neighbours];
+  }
+
   async searchChapters(): Promise<RetrievedSegment[]> {
     return this.chapterResults;
   }

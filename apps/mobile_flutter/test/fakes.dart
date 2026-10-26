@@ -239,7 +239,7 @@ class FakeApi implements PodcastApi {
     String? episodeId,
     double? positionSec,
     List<QaTurn> history = const <QaTurn>[],
-    int topK = 6,
+    int topK = 10,
   }) async {
     questionCalls += 1;
     askedWithEpisode = episodeId != null;

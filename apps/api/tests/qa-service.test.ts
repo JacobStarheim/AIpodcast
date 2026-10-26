@@ -142,4 +142,11 @@ describe("answerQuestion", () => {
       expect.objectContaining({ episodeId: EPISODE_ID, grounded: false })
     ]);
   });
+
+  it("gives the model the passages next to each hit", async () => {
+    const { repository, aiClient, ask } = setup();
+    repository.neighbours = [segment({ segmentId: "seg_next", startSec: 152, endSec: 170, text: "The answer is here." })];
+    await ask({ questionText: "What did the host say?", episodeId: EPISODE_ID });
+    expect(aiClient.answerCalls[0]?.evidence.map((item) => item.segmentId)).toEqual(["seg_1", "seg_next", "chapter:c1"]);
+  });
 });

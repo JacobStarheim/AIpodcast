@@ -34,7 +34,7 @@ abstract class PodcastApi {
     String? episodeId,
     double? positionSec,
     List<QaTurn> history = const <QaTurn>[],
-    int topK = 6,
+    int topK = 10,
   });
   Future<SynthesizedAudio> synthesize(String text);
 }
@@ -276,7 +276,7 @@ class HttpPodcastApi implements PodcastApi {
     String? episodeId,
     double? positionSec,
     List<QaTurn> history = const <QaTurn>[],
-    int topK = 6,
+    int topK = 10,
   }) async {
     final payload = <String, dynamic>{
       'questionText': questionText,

@@ -424,6 +424,38 @@ export class PostgresRepository implements Repository {
     return result.rows.map(mapSegment).reverse();
   }
 
+  async withNeighbours(hits: RetrievedSegment[]): Promise<RetrievedSegment[]> {
+    const passages = hits.filter((hit) => hit.kind === "segment");
+    if (passages.length === 0) return hits;
+    // Passages are contiguous, so neighbours touch the hit's start or end.
+    const result = await this.pool.query(
+      `SELECT DISTINCT ON (hit.position, ts.start_sec) hit.position, ${segmentColumns}
+       FROM unnest($1::uuid[], $2::float8[], $3::float8[]) WITH ORDINALITY
+              AS hit(episode_id, start_sec, end_sec, position)
+       JOIN transcript_segments ts
+         ON ts.episode_id = hit.episode_id
+        AND ts.end_sec >= hit.start_sec - 0.5
+        AND ts.start_sec <= hit.end_sec + 0.5
+       JOIN episodes e ON e.id = ts.episode_id
+       ORDER BY hit.position, ts.start_sec`,
+      [
+        passages.map((hit) => hit.episodeId),
+        passages.map((hit) => hit.startSec),
+        passages.map((hit) => hit.endSec)
+      ]
+    );
+    const scores = new Map(passages.map((hit) => [hit.segmentId, hit.score]));
+    const seen = new Set<string>();
+    const expanded: RetrievedSegment[] = [];
+    for (const row of result.rows) {
+      const segment = mapSegment(row);
+      if (seen.has(segment.segmentId)) continue;
+      seen.add(segment.segmentId);
+      expanded.push({ ...segment, score: scores.get(segment.segmentId) ?? 0 });
+    }
+    return expanded;
+  }
+
   async searchChapters(input: { embedding: number[]; topK: number }): Promise<RetrievedSegment[]> {
     const result = await this.pool.query(
       `SELECT c.id, c.episode_id, e.title AS episode_title, c.start_sec, c.end_sec,
