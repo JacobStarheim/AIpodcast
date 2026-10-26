@@ -72,3 +72,41 @@ class _CoverPainter extends CustomPainter {
       oldDelegate.background != background ||
       oldDelegate.foreground != foreground;
 }
+
+/// Remote podcast artwork with [EpisodeArt] as the placeholder and fallback.
+class PodcastArtwork extends StatelessWidget {
+  const PodcastArtwork(
+      {super.key, required this.imageUrl, required this.seed, this.size = 92});
+  final String? imageUrl;
+  final String seed;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    final url = imageUrl;
+    final fallback = EpisodeArt(seed: seed, size: size);
+    final uri = url == null ? null : Uri.tryParse(url);
+    if (uri == null || !(uri.scheme == 'https' || uri.scheme == 'http')) {
+      return fallback;
+    }
+    final pixels = (size * MediaQuery.devicePixelRatioOf(context)).round();
+    return ExcludeSemantics(
+      child: SizedBox.square(
+        dimension: size,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(size * .18),
+          child: Image.network(
+            url!,
+            width: size,
+            height: size,
+            fit: BoxFit.cover,
+            cacheWidth: pixels,
+            frameBuilder: (context, child, frame, synchronous) =>
+                synchronous || frame != null ? child : fallback,
+            errorBuilder: (context, error, stackTrace) => fallback,
+          ),
+        ),
+      ),
+    );
+  }
+}

@@ -6,7 +6,15 @@ export interface ParsedRssEpisode {
   description: string;
   publishedAt: string;
   audioUrl: string;
+  imageUrl: string | null;
   durationSec: number | null;
+}
+
+export interface ParsedFeed {
+  title: string;
+  language: string | null;
+  imageUrl: string | null;
+  episodes: ParsedRssEpisode[];
 }
 
 function asArray<T>(value: T | T[] | undefined): T[] {
@@ -77,7 +85,21 @@ function getEnclosureUrl(item: Record<string, unknown>): string {
   return "";
 }
 
+function getImageUrl(node: Record<string, unknown> | undefined): string | null {
+  const itunesImage = node?.["itunes:image"] as Record<string, unknown> | undefined;
+  if (itunesImage && typeof itunesImage.href === "string" && /^https?:\/\//.test(itunesImage.href)) {
+    return itunesImage.href;
+  }
+  const image = node?.image as Record<string, unknown> | undefined;
+  const url = image ? readText(image.url) : "";
+  return /^https?:\/\//.test(url) ? url : null;
+}
+
 export function parseRss(xml: string): ParsedRssEpisode[] {
+  return parseFeed(xml).episodes;
+}
+
+export function parseFeed(xml: string): ParsedFeed {
   const parser = new XMLParser({
     ignoreAttributes: false,
     attributeNamePrefix: "",
@@ -110,11 +132,19 @@ export function parseRss(xml: string): ParsedRssEpisode[] {
       description,
       publishedAt: parsePublishedAt(item.pubDate),
       audioUrl,
+      imageUrl: getImageUrl(item),
       durationSec: parseDuration(item["itunes:duration"])
     });
   }
 
-  return [...byGuid.values()].sort((a, b) => {
+  const episodes = [...byGuid.values()].sort((a, b) => {
     return new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime();
   });
+  const language = channel ? readText(channel.language).split(/[\s,;]/)[0] ?? "" : "";
+  return {
+    title: channel ? readText(channel.title) : "",
+    language: /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/.test(language) ? language : null,
+    imageUrl: getImageUrl(channel),
+    episodes
+  };
 }

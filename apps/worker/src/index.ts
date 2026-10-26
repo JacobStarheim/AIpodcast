@@ -1,24 +1,33 @@
 import { loadConfig } from "./config.js";
-import { createPool } from "./db.js";
+import { assertSchemaVersion, createPool } from "./db.js";
 import { WorkerOpenAiClient } from "./openai-client.js";
+import { PostgresWorkerStore } from "./store.js";
 import { WorkerService } from "./worker-service.js";
 
 async function main() {
   const config = loadConfig();
   const pool = createPool(config.databaseUrl);
+  await assertSchemaVersion(pool);
   const aiClient = new WorkerOpenAiClient({
     apiKey: config.openAiApiKey,
     transcribeModel: config.transcribeModel,
     embedModel: config.embedModel,
+    chatModel: config.chatModel,
+    transcribeConcurrency: config.transcribeConcurrency,
     audioChunkOptions: {
+      targetChunkSec: config.audioChunkTargetSec,
       ffmpegPath: config.ffmpegPath,
       ffprobePath: config.ffprobePath
     }
   });
 
-  const worker = new WorkerService(pool, aiClient, {
+  const worker = new WorkerService(new PostgresWorkerStore(pool), aiClient, {
     maxEpisodeAudioMb: config.maxEpisodeAudioMb,
-    defaultMaxEpisodesPerSource: config.defaultMaxEpisodesPerSource
+    defaultMaxEpisodesPerSource: config.defaultMaxEpisodesPerSource,
+    maxTranscriptionAttempts: config.maxTranscriptionAttempts,
+    allowPrivateNetwork: config.allowPrivateNetwork,
+    maxChunkSec: config.audioChunkTargetSec * 1.5,
+    staleJobSec: config.staleJobSec
   });
 
   let running = false;

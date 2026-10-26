@@ -1,7 +1,7 @@
 import OpenAI from "openai";
 import { describe, expect, it } from "vitest";
 import { OpenAiClient } from "../src/ai-client.js";
-import type { RetrievedSegment } from "../src/types.js";
+import type { Evidence } from "../src/types.js";
 
 const config = {
   apiKey: "test-key",
@@ -11,8 +11,9 @@ const config = {
   ttsModel: "gpt-realtime-2.1-mini"
 };
 
-const segment: RetrievedSegment = {
+const segment: Evidence = {
   segmentId: "seg-1",
+  kind: "segment",
   episodeId: "ep-1",
   episodeTitle: "A real topic",
   startSec: 12,
@@ -80,7 +81,12 @@ describe("OpenAI adapter contracts", () => {
     const { client, requests } = mockClient(
       responsePayload(JSON.stringify({ answerText: "Five listeners.", citationIndices: [0, 0] }))
     );
-    const answer = await client.answerGrounded({ questionText: "How many listeners?", segments: [segment] });
+    const answer = await client.answerGrounded({
+      questionText: "How many listeners?",
+      evidence: [segment],
+      history: [{ question: "Who tested it?", answer: "The team." }],
+      episodeSummary: "A prototype review."
+    });
 
     expect(answer).toEqual({ answerText: "Five listeners.", citationIndices: [0] });
     expect(requests[0]?.url).toBe("https://api.openai.com/v1/responses");
@@ -93,7 +99,9 @@ describe("OpenAI adapter contracts", () => {
     expect(body.text.format.strict).toBe(true);
     expect(body.text.format.schema.additionalProperties).toBe(false);
     expect(body.input[1].content).toContain(segment.text);
-    expect(body.input[1].content).toContain("start=12.00");
+    expect(body.input[1].content).toContain("[0] passage episode=\"A real topic\" time=0:12-0:20");
+    expect(body.input[1].content).toContain("Listener: Who tested it?\nAssistant: The team.");
+    expect(body.input[1].content).toContain("Episode overview:\nA prototype review.");
   });
 
   it.each([
@@ -106,7 +114,7 @@ describe("OpenAI adapter contracts", () => {
     '{"answerText":"Unsupported claim.","citationIndices":[7]}'
   ])("refuses unusable or uncited model output: %s", async (output) => {
     const { client } = mockClient(responsePayload(output));
-    expect(await client.answerGrounded({ questionText: "Question", segments: [segment] })).toEqual({
+    expect(await client.answerGrounded({ questionText: "Question", evidence: [segment], history: [], episodeSummary: null })).toEqual({
       answerText: "",
       citationIndices: []
     });
@@ -116,29 +124,69 @@ describe("OpenAI adapter contracts", () => {
     const { client } = mockClient(
       responsePayload('{"answerText":"Five listeners.","citationIndices":[0]}', "incomplete")
     );
-    await expect(client.answerGrounded({ questionText: "Question", segments: [segment] })).rejects.toThrow(
+    await expect(client.answerGrounded({ questionText: "Question", evidence: [segment], history: [], episodeSummary: null })).rejects.toThrow(
       "did not finish"
     );
   });
 
   it("does not request an answer when there is no evidence", async () => {
     const { client, requests } = mockClient({});
-    expect(await client.answerGrounded({ questionText: "Question", segments: [] })).toEqual({
+    expect(await client.answerGrounded({ questionText: "Question", evidence: [], history: [], episodeSummary: null })).toEqual({
       answerText: "",
       citationIndices: []
     });
     expect(requests).toHaveLength(0);
   });
 
-  it("keeps the embedding model compatible with existing stored vectors", async () => {
-    const { client, requests } = mockClient({ data: [{ embedding: [0.2, 0.5, 0.1] }] });
-    expect(await client.embedText("Question")).toEqual([0.2, 0.5, 0.1]);
+  it("labels just-heard passages and chapters for the model", async () => {
+    const { client, requests } = mockClient(
+      responsePayload(JSON.stringify({ answerText: "They meant the pilot.", citationIndices: [0] }))
+    );
+    await client.answerGrounded({
+      questionText: "What did they just mean?",
+      evidence: [
+        { ...segment, recentlyHeard: true },
+        { ...segment, segmentId: "chapter:c1", kind: "chapter", startSec: 0, endSec: 600, text: "Intro: Hello." }
+      ],
+      history: [],
+      episodeSummary: null
+    });
+    const body = await requests[0]!.json();
+    expect(body.input[1].content).toContain("[0] just-heard passage");
+    expect(body.input[1].content).toContain("[1] chapter summary episode=\"A real topic\" time=0:00-10:00");
+    expect(body.input[1].content).not.toContain("Earlier conversation");
+  });
+
+  it("plans translated, standalone search queries", async () => {
+    const { client, requests } = mockClient(
+      responsePayload(JSON.stringify({ queries: ["  how many sensors Aurora ", "", 42], overview: false }))
+    );
+    const plan = await client.planSearch({
+      questionText: "Hvor mange har den?",
+      history: [{ question: "Hva heter skipet?", answer: "Aurora." }],
+      transcriptLanguages: ["en"],
+      episodeTitle: "Aurora voyage"
+    });
+    expect(plan).toEqual({ queries: ["how many sensors Aurora"], overview: false });
+    const body = await requests[0]!.json();
+    expect(body.text.format.name).toBe("podcast_search_plan");
+    expect(body.input[1].content).toContain("Transcript language: en");
+    expect(body.input[1].content).toContain("Listener: Hva heter skipet?");
+  });
+
+  it("embeds several texts in one request, in input order", async () => {
+    const { client, requests } = mockClient({
+      data: [{ index: 1, embedding: [0.3] }, { index: 0, embedding: [0.2] }]
+    });
+    expect(await client.embedTexts(["first", "second"])).toEqual([[0.2], [0.3]]);
     const body = await requests[0]!.json();
     expect(body.model).toBe("text-embedding-3-small");
+    expect(body.input).toEqual(["first", "second"]);
+    expect(body.dimensions).toBe(1536);
   });
 
   it("fails explicitly if embeddings are missing instead of querying with an empty vector", async () => {
     const { client } = mockClient({ data: [] });
-    await expect(client.embedText("Question")).rejects.toThrow("invalid embedding");
+    await expect(client.embedTexts(["Question"])).rejects.toThrow("invalid embedding");
   });
 });

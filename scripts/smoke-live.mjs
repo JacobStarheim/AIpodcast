@@ -34,7 +34,7 @@ let lock;
 
 function redact(value) {
   let text = String(value);
-  for (const name of ["OPENAI_API_KEY", "ADMIN_KEY", "DATABASE_URL"]) {
+  for (const name of ["OPENAI_API_KEY", "ADMIN_KEY", "APP_API_KEY", "DATABASE_URL"]) {
     if (config[name]) text = text.replaceAll(config[name], "[redacted]");
   }
   return text.replace(/sk-[\w-]+/g, "[redacted]");
@@ -43,6 +43,7 @@ function redact(value) {
 async function request(path, { body, admin = false, form } = {}) {
   const headers = {};
   if (admin) headers["x-admin-key"] = config.ADMIN_KEY;
+  else if (path !== "/health") headers.Authorization = `Bearer ${config.APP_API_KEY}`;
   if (body) headers["Content-Type"] = "application/json";
   const response = await fetch(`${apiOrigin}${path}`, {
     method: body || form ? "POST" : "GET",
@@ -154,6 +155,7 @@ async function ensureEpisode() {
 
 try {
   assert.ok(config.ADMIN_KEY, `Set ADMIN_KEY in ${envPath} or the environment.`);
+  assert.ok(config.APP_API_KEY, `Set APP_API_KEY in ${envPath} or the environment.`);
   const fixture = await prepareDemoFixture();
   const health = await request("/health");
   assert.equal(health.ok, true);

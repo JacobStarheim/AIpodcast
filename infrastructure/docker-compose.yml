@@ -11,12 +11,13 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U podcast -d podcast_ai"]
       interval: 10s
       timeout: 5s
       retries: 6
 
+# The schema lives in infrastructure/migrations and is applied by
+# `npm run db:migrate` (also part of `npm run db:up`).
 volumes:
   postgres_data:

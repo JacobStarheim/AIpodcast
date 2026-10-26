@@ -1,27 +1,35 @@
 import { createServer } from "node:http";
 import { loadConfig } from "./config.js";
-import { createPool } from "./db.js";
+import { assertSchemaVersion, createPool } from "./db.js";
 import { OpenAiClient } from "./ai-client.js";
+import { ItunesPodcastDirectory } from "./podcast-directory.js";
 import { PostgresRepository } from "./repository.js";
 import { createApp } from "./app.js";
 
 async function start() {
   const config = loadConfig();
   const pool = createPool(config.databaseUrl);
+  await assertSchemaVersion(pool);
   const repository = new PostgresRepository(pool);
   const aiClient = new OpenAiClient({
     apiKey: config.openAiApiKey,
     transcribeModel: config.transcribeModel,
     embedModel: config.embedModel,
     chatModel: config.chatModel,
+    planModel: config.planModel,
     ttsModel: config.ttsModel
   });
 
   const app = createApp({
     repository,
     aiClient,
+    podcastDirectory: new ItunesPodcastDirectory(),
     adminKey: config.adminKey,
-    minGroundingScore: config.minGroundingScore
+    appApiKey: config.appApiKey,
+    minGroundingScore: config.minGroundingScore,
+    podcastSearchCountry: config.podcastSearchCountry,
+    corsOrigins: config.corsOrigins,
+    trustProxy: config.trustProxy
   });
 
   const server = createServer(app);

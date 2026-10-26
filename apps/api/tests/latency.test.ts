@@ -1,84 +1,50 @@
 import request from "supertest";
 import { describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
-import type { AIClient, IngestJob, Repository, RetrievedSegment } from "../src/types.js";
-import type { EpisodeDetail, EpisodeListResponse, Source } from "@podcast/shared-types";
+import { APP_KEY, AUTH, FakeAIClient, FakeRepository } from "./fakes.js";
 
-class LatencyRepository implements Repository {
-  async createSource(): Promise<Source> {
-    throw new Error("not_used");
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+class LatencyAiClient extends FakeAIClient {
+  override async planSearch(input: Parameters<FakeAIClient["planSearch"]>[0]) {
+    await wait(60);
+    return super.planSearch(input);
   }
 
-  async enqueueIngestJob(): Promise<IngestJob> {
-    throw new Error("not_used");
+  override async embedTexts(texts: string[]) {
+    await wait(40);
+    return super.embedTexts(texts);
   }
 
-  async listEpisodes(): Promise<EpisodeListResponse> {
-    return { items: [], nextCursor: null };
+  override async answerGrounded(input: Parameters<FakeAIClient["answerGrounded"]>[0]) {
+    await wait(70);
+    return super.answerGrounded(input);
   }
 
-  async getEpisodeById(): Promise<EpisodeDetail | null> {
-    return null;
-  }
-
-  async searchSegments(): Promise<RetrievedSegment[]> {
-    return [
-      {
-        segmentId: "seg-latency",
-        episodeId: "ep-latency",
-        episodeTitle: "Latency",
-        startSec: 30,
-        endSec: 42,
-        text: "Latency benchmark segment",
-        score: 0.99
-      }
-    ];
-  }
-
-  async logQaEvent(): Promise<void> {
-    return;
-  }
-}
-
-class LatencyAiClient implements AIClient {
-  async transcribeAudio(): Promise<{ text: string; durationMs: number }> {
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    return { text: "question", durationMs: 20 };
-  }
-
-  async embedText(): Promise<number[]> {
-    await new Promise((resolve) => setTimeout(resolve, 40));
-    return [0.98];
-  }
-
-  async answerGrounded(): Promise<{ answerText: string; citationIndices: number[] }> {
-    await new Promise((resolve) => setTimeout(resolve, 70));
-    return { answerText: "Latency answer", citationIndices: [0] };
-  }
-
-  async synthesizeSpeech(): Promise<{ audioBase64: string; mimeType: "audio/mpeg" }> {
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    return { audioBase64: Buffer.from("ok").toString("base64"), mimeType: "audio/mpeg" };
+  override async synthesizeSpeech() {
+    await wait(50);
+    return super.synthesizeSpeech();
   }
 }
 
 describe("Latency target", () => {
   it("keeps mocked QA+TTS path under 4 seconds", async () => {
     const app = createApp({
-      repository: new LatencyRepository(),
+      repository: new FakeRepository(),
       aiClient: new LatencyAiClient(),
       adminKey: "dev-admin",
+      appApiKey: APP_KEY,
       minGroundingScore: 0.45
     });
 
     const start = Date.now();
-    const qa = await request(app).post("/v1/qa/answer").send({
+    const qa = await request(app).post("/v1/qa/answer").set(AUTH).send({
       questionText: "latency test"
     });
     expect(qa.status).toBe(200);
     expect(qa.body.grounded).toBe(true);
 
-    const tts = await request(app).post("/v1/voice/synthesize").send({ text: qa.body.answerText });
+    const tts = await request(app).post("/v1/voice/synthesize").set(AUTH).send({ text: qa.body.answerText });
     expect(tts.status).toBe(200);
 
     const elapsed = Date.now() - start;
