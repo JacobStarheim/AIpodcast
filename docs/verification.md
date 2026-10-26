@@ -1,9 +1,133 @@
 # Verification record
 
-Checks performed on 2026-10-26 against the `feat/real-podcast-readiness` working
-tree. API keys remain in ignored backend environment files.
+Checks performed on 2026-10-26. [Daily use](#daily-use) covers the
+`feat/daily-use` revision (accounts, stored audio, streaming, Norwegian); the
+sections after it were recorded earlier against `feat/real-podcast-readiness`
+and describe what was true then. API keys remain in ignored backend environment
+files.
 
-## Automated checks
+## Daily use
+
+### Automated checks
+
+| Check | Result |
+| --- | --- |
+| `npm run build` | Passed: shared types, API, and worker |
+| `npm test` | Passed: 110 API tests and 77 worker tests (database suites skipped) |
+| `npm run test:db` | Passed: migrations applied to a fresh database twice (second run a no-op); 11 API and 8 worker database tests against PostgreSQL 16 with pgvector 0.8.7 |
+| Flutter analysis | Clean |
+| Full `flutter test` suite | Passed: 292 tests |
+
+New database tests cover accounts and sessions, the shared rate-limit counters,
+stored audio and daily usage, due feed refreshes and the selection of episodes
+for automatic transcription. Migration `003` was applied to the local database
+(604 episodes, three of them transcribed) after a `pg_dump` backup.
+
+`main` now requires both CI jobs ("Backend build, tests and database tests" and
+"Flutter analyze and tests") to pass before a merge.
+
+### Names in transcripts
+
+The worker now sends the podcast and episode title and the names found in the
+episode description (runs of two to four capitalised words) as the
+transcription prompt. On the two Hard Fork clips where "Erin Griffith" had
+become "Aaron Griffith", `gpt-transcribe` without hints was wrong every time and
+right every time with them; `whisper-1` with hints was right as well.
+
+Re-transcribing the whole episode (86 seconds) reduced the name errors from five
+to two: one remaining "Aaron Griffith", and "Camen" in a sponsor read whose
+names are not in the description. In the Norwegian episode below, a name that
+is not in its description is still misspelled ("Akstad"); hints can only help
+with names the publisher lists.
+
+`gpt-4o-transcribe-diarize`, which labels speakers, was tried on the same clips.
+It still wrote "Aaron Griffith", was slower, and a request for a 10-minute
+window did not return within the client's five-minute limit. Speaker labels are
+therefore not stored, and questions about who said something rely on the
+transcript text.
+
+### Dynamically inserted ads
+
+Two downloads of the same Hard Fork episode were 4048 and 4035 seconds long:
+the ads differ between requests. Passages after the ads were 13–17 seconds off
+when the publisher's file was played. The worker now keeps the file it
+transcribed and the API serves it through signed links with Range support. The
+re-transcribed episode is played from the stored 65 MB file.
+
+The daily transcription count matched the file length exactly in the last run
+(+1023.3 seconds for the Norwegian episode, 131 seconds more than its RSS
+duration because of ads). One earlier run counted 19.6 seconds more than the
+file length; the cause was not found.
+
+### A Norwegian episode
+
+Forklart's "Førdefjorden" episode (17 minutes, Aftenposten) was transcribed in
+38 seconds. `scripts/eval/datasets/forklart-fordefjorden.json` has 20 questions
+from its transcript: 13 factual, 2 asked in English, 1 follow-up, 1 overview,
+1 asked at a playback position and 2 the episode cannot answer.
+
+| Configuration | Passed | Correct answers | Citation in the right place | Wrong refusals | Median latency |
+| --- | --- | --- | --- | --- | --- |
+| Before word stems in keyword search | 19/20, 18/20 | 17/18, 16/18 | 16/17, 15/17 | 1, 2 | 3.6 s, 3.2 s |
+| With word stems (`fjorden` also matches `fjordene`) | 20/20, 19/20 | 18/18, 17/18 | 17/17, 16/17 | 0, 1 | 3.1 s, 3.5 s |
+
+Both unanswerable questions were refused in every run, with the Norwegian
+refusal text.
+
+### Faster question rewriting
+
+The Hard Fork set was run with three models for question rewriting:
+
+| Rewrite model | Passed | Median latency |
+| --- | --- | --- |
+| `gpt-6-luna` (previous) | 28/29 | 4.5 s |
+| `gpt-5.4-mini` (new default) | 28/29, 28/29 | 3.6 s, 3.4 s |
+| `gpt-4.1-mini` | 27/29, 29/29 | 2.5 s, 2.6 s |
+
+`gpt-4.1-mini` is faster but misjudged the language of a Norwegian question in
+one run. With all changes in place the set passed 29/29 (26/26 correct answers,
+22/22 citations in the right place), median 3.0 s, p90 4.4 s.
+
+### Language of the answer
+
+The reports showed the answer model drifting into the language of the evidence:
+both English questions about the Norwegian episode were answered in Norwegian
+in all four runs, and one English question about the English episode got a
+Spanish answer once. The model was only told to answer "in the language of the
+question". It now also gets the language itself, from the question planner or,
+when the planner was skipped, from frequent words in the question.
+
+After the change, all 29 + 20 answers and refusals were in the language of the
+question. The Norwegian set passed 20/20 (median 3.9 s). The English set passed
+28/29 (median 3.2 s): a "what did they just say?" case was refused once without
+a valid citation and passed in four reruns.
+
+### Where **Listen from** starts
+
+The answer model now quotes the words it relies on, and the start is estimated
+from where the quote sits in its 10–30-second passage, 1.5 seconds early. Over
+the English set's cited answers, the average wait from **Listen from** to the
+quoted words fell from 12.1 to 6.8 seconds, and playback never started after
+them.
+
+### iPhone simulator
+
+The rebuilt app on the iPhone 17 simulator (iOS 26.5) against the local API,
+worker and demo server:
+
+| Flow | Observed result |
+| --- | --- |
+| Sign in | The sign-in screen accepted an account created with `npm run user:create`; the account sheet shows its name and email and **Sign out** |
+| Library | Minutes left today next to **Transcribe**; **Only ready** shows the three ready episodes (of 604) |
+| Stored audio | The Norwegian episode played as 17:03, the stored file, not the 14:52 in the feed |
+| Background playback | Playback continued from 0:12 to 0:39 while the app was on the home screen |
+| Streamed answer | "Hvorfor er Førdefjorden viktig, og hva mente Høyesterett?" was answered in Norwegian as the text arrived, with **Listen from 3:24** |
+
+Not exercised: the lock-screen controls themselves, a recorded question,
+signing out, and the automatic-transcription switch (covered by API and widget
+tests). Android was not run, for lack of an emulator; a debug APK builds.
+
+## Earlier revision: automated checks
 
 | Check | Result |
 | --- | --- |
@@ -11,7 +135,7 @@ tree. API keys remain in ignored backend environment files.
 | `npm test` | Passed: 70 API tests and 70 worker tests (database suites skipped) |
 | `npm run test:db` | Passed: migrations applied to a fresh database twice (second run a no-op); 6 API and 5 worker database tests against PostgreSQL 16 with pgvector 0.8.7 |
 | Flutter analysis | Clean |
-| Full `flutter test` suite | Passed: 169 tests (63 before this revision) |
+| Full `flutter test` suite | Passed: 169 tests (63 before that revision) |
 
 The database suites use the real SQL: feed upserts, job claiming with
 `SKIP LOCKED`, stale-job recovery, attempt limits, transcript and chapter
@@ -66,7 +190,8 @@ and one chapter with the real model. Questions against the real models:
 | "Hva heter kapteinen på Aurora?" | Refused (`insufficient_grounded_citations`) |
 | Library-wide "Which ship carries sea temperature sensors?" | "The research ship Aurora …", cites 0:00–0:30 |
 
-The refusal text itself is English regardless of the question's language.
+At the time the refusal text was English regardless of the question's language;
+it now follows the question's language.
 
 Rewriting the question takes 2.1–2.4 seconds with the configured model, longer
 than the answer itself (1.2–1.6 seconds). It therefore runs in parallel with a
@@ -133,7 +258,8 @@ episodes, or questions phrased very differently.
 ## Mobile app
 
 The app was built for and run on an **iPhone 17 simulator (iOS 26.5)** against
-the running API, worker and demo server, with the debug app key:
+the running API, worker and demo server, with the debug app key that was used
+before accounts existed:
 
 | Flow | Observed result |
 | --- | --- |
@@ -153,13 +279,19 @@ application ID changed to `io.github.jacobstarheim.aipodcast`.
 
 ## Remaining limits
 
-- One real episode has been transcribed and evaluated (see above); other
-  podcasts, languages and audio styles have not.
-- No physical iOS or Android devices have been verified.
+- Two real episodes have been transcribed and evaluated, one English talk show
+  and one Norwegian news podcast; other podcasts and audio styles have not.
+- No physical iOS or Android devices have been verified, and Android has not
+  been run in this revision.
 - The demo fixture is short and controlled; the checks do not establish
   transcription quality across arbitrary podcast feeds, languages, or recordings.
-- Citations identify clips of 10–30 seconds rather than individual words.
-- Rate limits are per API process and per client address; the app key is shared.
+- **Listen from** is estimated within a 10–30-second clip; there are no word
+  timestamps and no speaker labels.
+- Names that the episode description does not list can still be misspelled.
+- The server setup in [deploy.md](deploy.md) has not run on a public server.
+  Both Docker images were built locally; they run as a non-root user, the worker
+  image has FFmpeg, and the API image contains the migrations and account
+  script.
 - Spoken answers are rejected when the Realtime model does not read the text
   verbatim. In one of four live runs the Norwegian speech check failed this way
   ("Generated speech did not match the supplied answer") and passed on rerun.

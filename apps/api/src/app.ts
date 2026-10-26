@@ -1,23 +1,36 @@
 import express, { type NextFunction, type Request, type Response } from "express";
 import cors from "cors";
 import multer from "multer";
-import type {
-  PodcastSearchResponse,
-  SourceListResponse,
-  TranscribeEpisodeResponse,
-  TranscriptionStatus
-} from "@podcast/shared-types";
-import { answerQuestion } from "./qa-service.js";
-import { sanitizeHistory } from "./retrieval.js";
 import {
-  errorHandler,
-  HttpError,
-  RateLimiter,
-  requestId,
-  requireAdminKey,
-  requireAppKey
-} from "./security.js";
+  transcriptionPrompt,
+  type LoginResponse,
+  type PodcastSearchResponse,
+  type QAStreamEvent,
+  type SourceListResponse,
+  type TranscribeEpisodeResponse,
+  type TranscriptionStatus,
+  type UsageResponse,
+  type User
+} from "@podcast/shared-types";
+import {
+  hashPassword,
+  hashToken,
+  MIN_PASSWORD_LENGTH,
+  newSessionToken,
+  SESSION_DAYS,
+  verifyAgainstDummy,
+  verifyPassword
+} from "./auth.js";
+import { MediaSigner, sendAudioFile } from "./media.js";
+import { answerQuestion, type QaInput } from "./qa-service.js";
+import { RateLimiter } from "./rate-limit.js";
+import { sanitizeHistory } from "./retrieval.js";
+import { errorHandler, HttpError, keysMatch, requestId, requireAdminKey } from "./security.js";
 import type { AIClient, PodcastDirectory, Repository } from "./types.js";
+
+/** The identity of requests made with the optional APP_API_KEY service token. */
+const SERVICE_USER: User = { id: "service", email: "service@localhost", name: "Service", role: "admin" };
+const UNKNOWN_DURATION_SEC = 3600;
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STATUSES: TranscriptionStatus[] = ["pending", "queued", "processing", "ready", "failed"];
@@ -28,9 +41,12 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
-function asyncRoute(handler: (req: Request, res: Response) => Promise<void>) {
+/** Wraps an async handler; with `middleware`, calls next() after it succeeds. */
+function asyncRoute(handler: (req: Request, res: Response) => Promise<void>, middleware = false) {
   return (req: Request, res: Response, next: NextFunction) => {
-    handler(req, res).catch(next);
+    handler(req, res).then(() => {
+      if (middleware) next();
+    }, next);
   };
 }
 
@@ -63,6 +79,14 @@ function httpUrl(value: unknown, field: string): string | undefined {
   return url.href;
 }
 
+function bearerToken(req: Request): string | undefined {
+  return /^Bearer\s+(.+)$/i.exec(req.header("authorization") ?? "")?.[1]?.trim();
+}
+
+function minutes(seconds: number): number {
+  return Math.round(seconds / 6) / 10;
+}
+
 function episodeIdParam(req: Request): string {
   const id = String(req.params.episodeId ?? "");
   if (!UUID_PATTERN.test(id)) throw new HttpError(404, "not_found");
@@ -74,11 +98,16 @@ export function createApp(input: {
   aiClient: AIClient;
   podcastDirectory?: PodcastDirectory;
   adminKey: string;
-  appApiKey: string;
+  /** Optional service token for scripts; accepted like a session token. */
+  appApiKey?: string;
   minGroundingScore: number;
+  mediaSigner?: MediaSigner;
+  audioStorageDirectory?: string;
+  /** Daily transcription limit in seconds; 0 or unset means no limit. */
+  dailyTranscriptionSec?: number;
   podcastSearchCountry?: string;
   corsOrigins?: string[];
-  trustProxy?: string | false;
+  trustProxy?: boolean | number | string;
   rateLimiter?: RateLimiter;
   logError?: (message: string, error: unknown) => void;
 }) {
@@ -100,6 +129,38 @@ export function createApp(input: {
     res.json({ ok: true });
   });
 
+  // Signed links for media players, which cannot send an Authorization header.
+  app.get("/v1/media/episodes/:episodeId", asyncRoute(async (req, res) => {
+    const episodeId = episodeIdParam(req);
+    if (!input.mediaSigner || !input.audioStorageDirectory ||
+        !input.mediaSigner.verify(episodeId, req.query.exp, req.query.sig)) {
+      throw new HttpError(403, "link expired or invalid");
+    }
+    const audio = await input.repository.getEpisodeAudio(episodeId);
+    if (!audio) throw new HttpError(404, "not_found");
+    await sendAudioFile(res, input.audioStorageDirectory, audio.file, audio.mimeType, req.header("range"));
+  }));
+
+  app.post("/v1/auth/login", limits.middleware("login", 10, 15 * MINUTE), asyncRoute(async (req, res) => {
+    const email = optionalString(req.body?.email, "email", 320);
+    const password = typeof req.body?.password === "string" ? req.body.password : "";
+    if (!email || !password) throw new HttpError(400, "email and password are required");
+    const user = await input.repository.findUserForLogin(email);
+    const valid = user && !user.disabled
+      ? await verifyPassword(password, user.passwordHash)
+      : await verifyAgainstDummy(password);
+    if (!user || !valid) throw new HttpError(401, "invalid email or password");
+    const { token, tokenHash } = newSessionToken();
+    const expiresAt = new Date(Date.now() + SESSION_DAYS * 24 * 60 * MINUTE);
+    await input.repository.createSession({ userId: user.id, tokenHash, expiresAt });
+    const response: LoginResponse = {
+      token,
+      expiresAt: expiresAt.toISOString(),
+      user: { id: user.id, email: user.email, name: user.name, role: user.role }
+    };
+    res.json(response);
+  }));
+
   const admin = express.Router();
   admin.use(limits.middleware("admin", 60, MINUTE), requireAdminKey(input.adminKey));
 
@@ -110,6 +171,27 @@ export function createApp(input: {
       throw new HttpError(400, "name and rssUrl are required");
     }
     res.status(201).json(await input.repository.createSource({ name, rssUrl }));
+  }));
+
+  admin.post("/users", asyncRoute(async (req, res) => {
+    const email = optionalString(req.body?.email, "email", 320);
+    const name = optionalString(req.body?.name, "name", 200);
+    const password = typeof req.body?.password === "string" ? req.body.password : "";
+    const role = req.body?.role === "admin" ? "admin" : "user";
+    if (!email || !/^[^\s@]+@[^\s@]+$/.test(email)) throw new HttpError(400, "a valid email is required");
+    if (!name) throw new HttpError(400, "name is required");
+    if (password.length < MIN_PASSWORD_LENGTH) {
+      throw new HttpError(400, `password must be at least ${MIN_PASSWORD_LENGTH} characters`);
+    }
+    res.status(201).json(await input.repository.createUser({
+      email, name, role, passwordHash: await hashPassword(password)
+    }));
+  }));
+
+  admin.post("/episodes/:episodeId/retranscribe", asyncRoute(async (req, res) => {
+    const result = await input.repository.retranscribeEpisode(episodeIdParam(req));
+    if (!result) throw new HttpError(404, "not_found");
+    res.status(202).json(result);
   }));
 
   admin.post("/ingest/run", asyncRoute(async (req, res) => {
@@ -126,8 +208,42 @@ export function createApp(input: {
 
   const v1 = express.Router();
   // Authenticate first so rejected requests do not use up anyone's limits.
-  v1.use(requireAppKey(input.appApiKey));
+  v1.use(asyncRoute(async (req, res) => {
+    const token = bearerToken(req);
+    if (token && input.appApiKey && keysMatch(token, input.appApiKey)) {
+      res.locals.user = SERVICE_USER;
+    } else {
+      const user = token ? await input.repository.findSessionUser(hashToken(token)) : null;
+      if (!user) throw new HttpError(401, "unauthorized");
+      res.locals.user = user;
+      res.locals.sessionTokenHash = hashToken(token!);
+    }
+  }, true));
   const reads = limits.middleware("read", 300, MINUTE);
+
+  v1.post("/auth/logout", asyncRoute(async (_req, res) => {
+    if (res.locals.sessionTokenHash) await input.repository.deleteSession(res.locals.sessionTokenHash as string);
+    res.status(204).end();
+  }));
+
+  v1.get("/me", (_req, res) => {
+    res.json(res.locals.user as User);
+  });
+
+  const remainingSeconds = async () =>
+    (input.dailyTranscriptionSec ?? 0) - (await input.repository.getTranscribedSecondsToday());
+
+  v1.get("/usage", reads, asyncRoute(async (_req, res) => {
+    const usedSec = await input.repository.getTranscribedSecondsToday();
+    const limitSec = input.dailyTranscriptionSec ?? 0;
+    const response: UsageResponse = {
+      date: new Date().toISOString().slice(0, 10),
+      usedMinutes: minutes(usedSec),
+      limitMinutes: minutes(limitSec),
+      remainingMinutes: minutes(Math.max(0, limitSec - usedSec))
+    };
+    res.json(response);
+  }));
 
   v1.get("/podcasts/search", limits.middleware("podcast-search", 30, MINUTE), asyncRoute(async (req, res) => {
     const q = optionalString(req.query.q, "q", 100);
@@ -163,6 +279,15 @@ export function createApp(input: {
     res.status(created ? 201 : 200).json(source);
   }));
 
+  v1.patch("/sources/:sourceId", limits.middleware("update-source", 60, HOUR), asyncRoute(async (req, res) => {
+    const sourceId = String(req.params.sourceId ?? "");
+    if (!UUID_PATTERN.test(sourceId)) throw new HttpError(404, "not_found");
+    if (typeof req.body?.autoTranscribe !== "boolean") throw new HttpError(400, "autoTranscribe must be true or false");
+    const source = await input.repository.updateSource(sourceId, { autoTranscribe: req.body.autoTranscribe });
+    if (!source) throw new HttpError(404, "not_found");
+    res.json(source);
+  }));
+
   v1.get("/episodes", reads, asyncRoute(async (req, res) => {
     const sourceId = optionalUuid(req.query.sourceId, "sourceId");
     const q = optionalString(req.query.q, "q", 200);
@@ -195,7 +320,16 @@ export function createApp(input: {
     "/episodes/:episodeId/transcribe",
     limits.middleware("transcribe-episode", 10, HOUR),
     asyncRoute(async (req, res) => {
-      const result = await input.repository.requestTranscription(episodeIdParam(req));
+      const episodeId = episodeIdParam(req);
+      if (input.dailyTranscriptionSec) {
+        const episode = await input.repository.getEpisodeById(episodeId);
+        if (!episode) throw new HttpError(404, "not_found");
+        const needed = episode.durationSec ?? UNKNOWN_DURATION_SEC;
+        if (episode.transcriptionStatus !== "ready" && needed > await remainingSeconds()) {
+          throw new HttpError(429, "Today's transcription limit is used up", {}, "transcription_budget_exceeded");
+        }
+      }
+      const result = await input.repository.requestTranscription(episodeId);
       if (!result) throw new HttpError(404, "not_found");
       const response: TranscribeEpisodeResponse = result;
       res.status(result.jobId ? 202 : 200).json(response);
@@ -208,15 +342,34 @@ export function createApp(input: {
     upload.single("audio"),
     asyncRoute(async (req, res) => {
       if (!req.file?.buffer) throw new HttpError(400, "audio file is required");
+      // Names from the episode help the model spell them in the question.
+      const episodeId = optionalUuid(req.body?.episodeId, "episodeId");
+      const episode = episodeId ? await input.repository.getEpisodeById(episodeId) : null;
+      const prompt = episode
+        ? transcriptionPrompt({
+            show: episode.sourceName,
+            title: episode.title,
+            text: [episode.description, ...episode.chapters.map((chapter) => chapter.title)].join(" ")
+          })
+        : undefined;
       res.json(await input.aiClient.transcribeAudio({
         buffer: req.file.buffer,
         filename: req.file.originalname || "voice-question.webm",
-        mimeType: req.file.mimetype || "audio/webm"
+        mimeType: req.file.mimetype || "audio/webm",
+        prompt
       }));
     })
   );
 
-  v1.post("/qa/answer", limits.middleware("qa", 30, MINUTE), asyncRoute(async (req, res) => {
+  const qaLimit = limits.middleware("qa", 30, MINUTE);
+  const qaDependencies = {
+    repository: input.repository,
+    aiClient: input.aiClient,
+    minGroundingScore: input.minGroundingScore,
+    logError: input.logError
+  };
+
+  function parseQuestion(req: Request): QaInput {
     const questionText = optionalString(req.body?.questionText, "questionText", 1_000);
     if (!questionText) throw new HttpError(400, "questionText is required");
     const episodeId = optionalUuid(req.body?.episodeId, "episodeId");
@@ -231,17 +384,52 @@ export function createApp(input: {
       // 6 missed passages in a one-hour conversation, at the same latency.
       : 10;
 
-    res.json(await answerQuestion(
-      { repository: input.repository, aiClient: input.aiClient, minGroundingScore: input.minGroundingScore,
-        logError: input.logError },
-      {
-        questionText,
-        episodeId,
-        positionSec: episodeId && typeof rawPosition === "number" ? rawPosition : undefined,
-        history: sanitizeHistory(req.body?.history),
-        topK
+    return {
+      questionText,
+      episodeId,
+      positionSec: episodeId && typeof rawPosition === "number" ? rawPosition : undefined,
+      history: sanitizeHistory(req.body?.history),
+      topK
+    };
+  }
+
+  v1.post("/qa/answer", qaLimit, asyncRoute(async (req, res) => {
+    res.json(await answerQuestion(qaDependencies, parseQuestion(req)));
+  }));
+
+  /**
+   * Server-sent events: status, answer text as it is written, then the full
+   * response. Errors before the first event use the normal JSON error format.
+   */
+  v1.post("/qa/answer/stream", qaLimit, asyncRoute(async (req, res) => {
+    const question = parseQuestion(req);
+    const abort = new AbortController();
+    res.on("close", () => {
+      if (!res.writableFinished) abort.abort();
+    });
+    const send = (event: QAStreamEvent) => {
+      if (!res.headersSent) {
+        res.status(200);
+        res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+        res.setHeader("Cache-Control", "no-cache, no-transform");
+        res.setHeader("X-Accel-Buffering", "no");
+        res.flushHeaders();
       }
-    ));
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    };
+    try {
+      const response = await answerQuestion(qaDependencies, { ...question, onEvent: send, signal: abort.signal });
+      send({ type: "done", response });
+    } catch (error) {
+      if (!res.headersSent) throw error;
+      if (abort.signal.aborted) return;
+      const id = String(res.locals.requestId ?? "");
+      (input.logError ?? console.error)(`Request ${id} failed`, error);
+      send(error instanceof HttpError
+        ? { type: "error", error: error.message }
+        : { type: "error", error: "internal_error", requestId: id });
+    }
+    res.end();
   }));
 
   v1.post("/voice/synthesize", limits.middleware("voice-synthesize", 20, MINUTE), asyncRoute(async (req, res) => {

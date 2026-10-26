@@ -27,6 +27,23 @@ http.Response _jsonResponse(Object body) => http.Response(
       headers: {'content-type': 'application/json; charset=utf-8'},
     );
 
+/// A server-sent event stream with one `data:` line per event.
+String _sse(List<Object> events) =>
+    events.map((event) => 'data: ${jsonEncode(event)}\n\n').join();
+
+http.Response _sseResponse(List<Object> events) => http.Response.bytes(
+      utf8.encode(_sse(events)),
+      200,
+      headers: {'content-type': 'text/event-stream'},
+    );
+
+Map<String, Object> _done(Map<String, Object> response) =>
+    {'type': 'done', 'response': response};
+
+/// The final answer of an answer stream.
+Future<QaResponse> _answerOf(Stream<QaStreamEvent> events) async =>
+    (await events.toList()).whereType<QaDoneEvent>().single.response;
+
 void main() {
   group('HttpPodcastApi', () {
     late Directory fixtureDirectory;
@@ -119,38 +136,55 @@ void main() {
       expect(detail.episode.audioUrl, 'https://audio.example/ep1.mp3');
     });
 
-    test('posts a scoped question and maps grounded citations', () async {
+    test('streams a scoped question and maps grounded citations', () async {
       final api = apiWith(MockClient((request) async {
         expect(request.method, 'POST');
-        expect(request.url.toString(), 'https://api.example/v1/qa/answer');
+        expect(
+            request.url.toString(), 'https://api.example/v1/qa/answer/stream');
         expect(request.headers['content-type'], startsWith('application/json'));
+        expect(request.headers['accept'], 'text/event-stream');
         expect(jsonDecode(request.body), {
           'questionText': 'Hva sa verten?',
           'episodeId': 'ep1',
           'topK': 3,
         });
-        return _jsonResponse({
-          'answerText': 'Verten snakket om arkitektur.',
-          'grounded': true,
-          'citations': [
-            {
-              'segmentId': 'segment1',
-              'episodeId': 'ep1',
-              'episodeTitle': 'A useful episode',
-              'startSec': 12.5,
-              'endSec': 18,
-              'text': 'Architecture matters.',
-              'score': 0.9,
-            },
-          ],
-        });
+        return _sseResponse([
+          {'type': 'status', 'stage': 'searching'},
+          {'type': 'status', 'stage': 'answering'},
+          {'type': 'delta', 'text': 'Verten snakket '},
+          {'type': 'delta', 'text': 'om arkitektur.'},
+          _done({
+            'answerText': 'Verten snakket om arkitektur.',
+            'grounded': true,
+            'citations': [
+              {
+                'segmentId': 'segment1',
+                'episodeId': 'ep1',
+                'episodeTitle': 'A useful episode',
+                'startSec': 12.5,
+                'endSec': 18,
+                'playFromSec': 13.25,
+                'text': 'Architecture matters.',
+                'score': 0.9,
+              },
+            ],
+          }),
+        ]);
       }));
 
-      final answer = await api.askQuestion(
-        questionText: 'Hva sa verten?',
-        episodeId: 'ep1',
-        topK: 3,
-      );
+      final events = await api
+          .askQuestionStream(
+            questionText: 'Hva sa verten?',
+            episodeId: 'ep1',
+            topK: 3,
+          )
+          .toList();
+      expect(events.whereType<QaStatusEvent>().map((event) => event.stage),
+          [AnswerStage.searching, AnswerStage.answering]);
+      expect(events.whereType<QaDeltaEvent>().map((event) => event.text).join(),
+          'Verten snakket om arkitektur.');
+      expect(events.last, isA<QaDoneEvent>());
+      final answer = (events.last as QaDoneEvent).response;
 
       expect(answer.answerText, 'Verten snakket om arkitektur.');
       expect(answer.grounded, isTrue);
@@ -161,6 +195,7 @@ void main() {
       expect(citation.episodeTitle, 'A useful episode');
       expect(citation.startSec, 12.5);
       expect(citation.endSec, 18.0);
+      expect(citation.playFromSec, 13.25);
       expect(citation.text, 'Architecture matters.');
       expect(citation.score, 0.9);
     });
@@ -172,19 +207,22 @@ void main() {
           'questionText': 'Unanswerable question',
           'topK': 10,
         });
-        return _jsonResponse({
-          'answerText': 'There is not enough evidence.',
-          'grounded': false,
-          'citations': <Object>[],
-          'refusalReason': 'insufficient_retrieval_confidence',
-        });
+        return _sseResponse([
+          {'type': 'status', 'stage': 'searching'},
+          _done({
+            'answerText': 'There is not enough evidence.',
+            'grounded': false,
+            'citations': <Object>[],
+            'refusalReason': 'insufficient_retrieval_confidence',
+          }),
+        ]);
       }));
 
       for (final episodeId in <String?>[null, '']) {
-        final answer = await api.askQuestion(
+        final answer = await _answerOf(api.askQuestionStream(
           questionText: 'Unanswerable question',
           episodeId: episodeId,
-        );
+        ));
         expect(answer.grounded, isFalse);
         expect(answer.citations, isEmpty);
         expect(answer.refusalReason, 'insufficient_retrieval_confidence');
@@ -256,13 +294,18 @@ void main() {
       'listSources': (api, _) => api.listSources(),
       'addSource': (api, _) =>
           api.addSource(rssUrl: 'https://feeds.example/a.xml'),
-      'askQuestion': (api, _) => api.askQuestion(questionText: 'Question?'),
+      'askQuestionStream': (api, _) =>
+          api.askQuestionStream(questionText: 'Question?').toList(),
       'synthesize': (api, _) => api.synthesize('Answer.'),
       'transcribeVoiceFile': (api, path) => api.transcribeVoiceFile(path),
+      'getUsage': (api, _) => api.getUsage(),
+      'updateSource': (api, _) =>
+          api.updateSource('src1', autoTranscribe: true),
+      'me': (api, _) => api.me(),
     };
 
     for (final operation in operations.entries) {
-      test('${operation.key} sends the app key', () async {
+      test('${operation.key} sends the bearer token', () async {
         String? authorization;
         final api = apiWith(MockClient.streaming((request, body) async {
           await body.drain<void>();
@@ -516,38 +559,42 @@ void main() {
             {'question': 'Who is speaking?', 'answer': 'The host.'},
           ],
         });
-        return _jsonResponse({
-          'answerText': 'She meant the budget.',
-          'grounded': true,
-          'citations': [
-            {
-              'segmentId': 'chapter:c1',
-              'kind': 'chapter',
-              'episodeId': 'ep1',
-              'episodeTitle': 'A useful episode',
-              'startSec': 700,
-              'endSec': 800,
-              'text': 'Budget talk',
-              'score': 0.7,
-            },
-          ],
-        });
+        return _sseResponse([
+          _done({
+            'answerText': 'She meant the budget.',
+            'grounded': true,
+            'citations': [
+              {
+                'segmentId': 'chapter:c1',
+                'kind': 'chapter',
+                'episodeId': 'ep1',
+                'episodeTitle': 'A useful episode',
+                'startSec': 700,
+                'endSec': 800,
+                'text': 'Budget talk',
+                'score': 0.7,
+              },
+            ],
+          }),
+        ]);
       }));
-      final answer = await api.askQuestion(
+      final answer = await _answerOf(api.askQuestionStream(
         questionText: 'And what did she mean?',
         episodeId: 'ep1',
         positionSec: 754.5,
         history: const [QaTurn(question: 'Who is speaking?', answer: 'The host.')],
-      );
+      ));
       expect(answer.citations.single.kind, CitationKind.chapter);
     });
 
     test('never sends a position without an episode', () async {
       final api = apiWith(MockClient((request) async {
         expect(jsonDecode(request.body), {'questionText': 'Q?', 'topK': 10});
-        return _jsonResponse({'answerText': '', 'grounded': false});
+        return _sseResponse([
+          _done({'answerText': '', 'grounded': false}),
+        ]);
       }));
-      await api.askQuestion(questionText: 'Q?', positionSec: 12);
+      await _answerOf(api.askQuestionStream(questionText: 'Q?', positionSec: 12));
     });
 
     test('decodes JSON as UTF-8 when the charset is missing', () async {
@@ -559,6 +606,252 @@ void main() {
       }));
       expect((await api.transcribeVoiceFile(audioFile.path)).text,
           'Hva sa værten?');
+    });
+
+    test('resolves relative playback links against the API base URL',
+        () async {
+      final client = MockClient((request) async {
+        if (request.url.path.endsWith('/v1/episodes')) {
+          return _jsonResponse({
+            'items': [
+              {
+                ..._episodeJson,
+                'playbackUrl': '/v1/media/episodes/ep1?exp=1&sig=a',
+              },
+              {..._episodeJson, 'id': 'ep2'},
+            ],
+          });
+        }
+        return _jsonResponse({
+          'episode': {
+            ..._episodeJson,
+            'playbackUrl': 'https://cdn.example/ep1.mp3?sig=b',
+          },
+        });
+      });
+      addTearDown(client.close);
+      final api = HttpPodcastApi(
+          baseUrl: 'https://host.example/podcast-api/', httpClient: client);
+      final items = (await api.listEpisodes()).items;
+      expect(items.first.playbackUrl,
+          'https://host.example/podcast-api/v1/media/episodes/ep1?exp=1&sig=a');
+      expect(items.first.audioUrl, 'https://audio.example/ep1.mp3');
+      expect(items.last.playbackUrl, 'https://audio.example/ep1.mp3',
+          reason: 'without playbackUrl the publisher link is played');
+      expect((await api.getEpisode('ep1')).episode.playbackUrl,
+          'https://cdn.example/ep1.mp3?sig=b');
+    });
+
+    test('resolveApiUrl handles absolute, rooted and relative links', () {
+      expect(resolveApiUrl('http://10.0.2.2:4000', '/v1/media/episodes/a?x=1'),
+          'http://10.0.2.2:4000/v1/media/episodes/a?x=1');
+      expect(resolveApiUrl('https://h.example/api/', '/v1/m'),
+          'https://h.example/api/v1/m');
+      expect(resolveApiUrl('https://h.example/api', 'v1/m'),
+          'https://h.example/api/v1/m');
+      expect(resolveApiUrl('https://h.example', '//cdn.example/a.mp3'),
+          'https://cdn.example/a.mp3');
+      expect(resolveApiUrl('https://h.example', 'https://other.example/a.mp3'),
+          'https://other.example/a.mp3');
+    });
+
+    test('reads today\'s transcription usage', () async {
+      final api = apiWith(MockClient((request) async {
+        expect(request.method, 'GET');
+        expect(request.url.toString(), 'https://api.example/v1/usage');
+        return _jsonResponse({
+          'date': '2026-10-26',
+          'usedMinutes': 42.5,
+          'limitMinutes': 180,
+          'remainingMinutes': 137.5,
+        });
+      }));
+      final usage = await api.getUsage();
+      expect(usage.date, '2026-10-26');
+      expect(usage.usedMinutes, 42.5);
+      expect(usage.limitMinutes, 180);
+      expect(usage.remainingMinutes, 137.5);
+      expect(usage.isUsedUp, isFalse);
+    });
+
+    test('turns automatic transcription on with a PATCH', () async {
+      final api = apiWith(MockClient((request) async {
+        expect(request.method, 'PATCH');
+        expect(request.url.toString(), 'https://api.example/v1/sources/src%201');
+        expect(request.headers['content-type'], startsWith('application/json'));
+        expect(jsonDecode(request.body), {'autoTranscribe': true});
+        return _jsonResponse({
+          'id': 'src 1',
+          'name': 'Sample',
+          'rssUrl': 'https://feeds.example/s',
+          'autoTranscribe': true,
+          'lastRefreshedAt': '2026-10-26T08:00:00Z',
+          'episodeCount': 3,
+          'readyEpisodeCount': 1,
+          'lastJob': null,
+        });
+      }));
+      final source = await api.updateSource('src 1', autoTranscribe: true);
+      expect(source.autoTranscribe, isTrue);
+      expect(source.lastRefreshedAt, DateTime.utc(2026, 10, 26, 8));
+      expect(source.episodeCount, 3);
+    });
+
+    test('sends the selected episode with a voice question', () async {
+      final api = apiWith(MockClient.streaming((request, bodyStream) async {
+        final multipart = latin1.decode(await bodyStream.toBytes());
+        expect(multipart,
+            contains('content-disposition: form-data; name="episodeId"\r\n\r\nep 7\r\n'));
+        expect(multipart, contains('name="audio"; filename="question.m4a"'));
+        return http.StreamedResponse(
+            Stream.value(utf8.encode('{"text":"Hvem er gjesten?"}')), 200);
+      }));
+      final result =
+          await api.transcribeVoiceFile(audioFile.path, episodeId: 'ep 7');
+      expect(result.text, 'Hvem er gjesten?');
+    });
+
+    test('a voice question without an episode has no episodeId field',
+        () async {
+      final api = apiWith(MockClient.streaming((request, bodyStream) async {
+        final multipart = latin1.decode(await bodyStream.toBytes());
+        expect(multipart, isNot(contains('name="episodeId"')));
+        return http.StreamedResponse(Stream.value(utf8.encode('{"text":"Q"}')), 200);
+      }));
+      await api.transcribeVoiceFile(audioFile.path);
+      await api.transcribeVoiceFile(audioFile.path, episodeId: '');
+    });
+
+    group('answer stream', () {
+      Stream<List<int>> chunks(List<List<int>> parts) =>
+          Stream.fromIterable(parts);
+
+      List<List<int>> splitEvery(List<int> bytes, int size) => [
+            for (var start = 0; start < bytes.length; start += size)
+              bytes.sublist(start,
+                  start + size > bytes.length ? bytes.length : start + size),
+          ];
+
+      test('events survive chunks that split lines, JSON and characters',
+          () async {
+        final body = utf8.encode(_sse([
+          {'type': 'status', 'stage': 'searching'},
+          {'type': 'status', 'stage': 'answering'},
+          {'type': 'delta', 'text': 'Verten sa at «blåbær» '},
+          {'type': 'delta', 'text': 'er gode.'},
+          _done({'answerText': 'Verten sa at «blåbær» er gode.', 'grounded': true}),
+        ]));
+        for (final size in [1, 2, 3, 7, 64]) {
+          final events = await parseAnswerStream(chunks(splitEvery(body, size)))
+              .toList();
+          expect(events, hasLength(5), reason: 'chunks of $size bytes');
+          expect(
+              events.whereType<QaDeltaEvent>().map((event) => event.text).join(),
+              'Verten sa at «blåbær» er gode.');
+          expect((events.last as QaDoneEvent).response.answerText,
+              'Verten sa at «blåbær» er gode.');
+        }
+      });
+
+      test('CRLF lines, comments, other fields and multi-line data', () async {
+        const raw = ': keep-alive\r\n'
+            'event: message\r\n'
+            'id: 1\r\n'
+            'data: {"type":"delta",\r\n'
+            'data:"text":"Hi"}\r\n'
+            '\r\n'
+            'retry: 1000\r\n'
+            '\r\n'
+            'data: {"type":"done","response":{"answerText":"Hi","grounded":true}}';
+        final data =
+            await serverSentEventData(chunks([utf8.encode(raw)])).toList();
+        expect(data, [
+          '{"type":"delta",\n"text":"Hi"}',
+          '{"type":"done","response":{"answerText":"Hi","grounded":true}}',
+        ], reason: 'a final event without its blank line still counts');
+        final events = await parseAnswerStream(chunks([utf8.encode(raw)])).toList();
+        expect(events.map((event) => event.runtimeType),
+            [QaDeltaEvent, QaDoneEvent]);
+      });
+
+      test('unknown and malformed events are skipped; the final one ends it',
+          () async {
+        final body = 'data: not json\n\n'
+            'data: {"type":"ping"}\n\n'
+            'data: {"type":"status","stage":"thinking"}\n\n'
+            'data: [1,2]\n\n'
+            '${_sse([
+              {'type': 'error', 'error': 'model unavailable', 'requestId': 'r1'},
+              {'type': 'delta', 'text': 'after the end'},
+            ])}';
+        final events =
+            await parseAnswerStream(chunks([utf8.encode(body)])).toList();
+        expect(events, hasLength(1));
+        final error = events.single as QaErrorEvent;
+        expect(error.error, 'model unavailable');
+        expect(error.requestId, 'r1');
+      });
+
+      test('streams over HTTP as the chunks arrive', () async {
+        final body = StreamController<List<int>>();
+        final api = apiWith(MockClient.streaming((request, _) async =>
+            http.StreamedResponse(body.stream, 200,
+                headers: {'content-type': 'text/event-stream'})));
+        final events = <QaStreamEvent>[];
+        final done = api
+            .askQuestionStream(questionText: 'Q?')
+            .listen(events.add)
+            .asFuture<void>();
+        body.add(utf8.encode('data: {"type":"status","stage":"sea'));
+        await Future<void>.delayed(Duration.zero);
+        expect(events, isEmpty);
+        body.add(utf8.encode('rching"}\n\ndata: {"type":"delta","text":"A"}\n'));
+        await Future<void>.delayed(Duration.zero);
+        expect(events.map((event) => event.runtimeType), [QaStatusEvent]);
+        body.add(utf8.encode('\n'));
+        await Future<void>.delayed(Duration.zero);
+        expect(events.map((event) => event.runtimeType),
+            [QaStatusEvent, QaDeltaEvent]);
+        body.add(utf8.encode(_sse([
+          _done({'answerText': 'A', 'grounded': true})
+        ])));
+        await done;
+        expect(events.last, isA<QaDoneEvent>());
+        await body.close();
+      });
+
+      test('validation errors before streaming are normal API errors',
+          () async {
+        final api = apiWith(MockClient((_) async => http.Response(
+            jsonEncode({'error': 'episode_not_ready'}), 409)));
+        await expectLater(
+            api.askQuestionStream(questionText: 'Q?', episodeId: 'ep1').toList(),
+            throwsA(isA<ApiException>()
+                .having((error) => error.statusCode, 'statusCode', 409)));
+      });
+
+      test('a stalled stream times out between chunks', () async {
+        final body = StreamController<List<int>>();
+        addTearDown(body.close);
+        final api = apiWith(
+          MockClient.streaming(
+              (_, __) async => http.StreamedResponse(body.stream, 200)),
+          requestTimeout: const Duration(milliseconds: 20),
+        );
+        body.add(utf8.encode(_sse([
+          {'type': 'status', 'stage': 'searching'}
+        ])));
+        await expectLater(api.askQuestionStream(questionText: 'Q?').toList(),
+            throwsA(isA<TimeoutException>()));
+      });
+
+      test('describeError explains a broken answer stream', () {
+        expect(
+            describeError(
+                const AnswerStreamException(serverMessage: 'boom'),
+                fallback: 'x'),
+            'The answer couldn’t be finished. Please try again.');
+      });
     });
 
     group('errors', () {
@@ -610,10 +903,32 @@ void main() {
         expect(error.userMessage, 'This episode isn’t ready for questions yet.');
       });
 
-      test('401 points at the app key', () async {
+      test('401 asks to sign in again', () async {
         final error = await errorFor(
             http.Response(jsonEncode({'error': 'unauthorized'}), 401));
-        expect(error.userMessage, contains('API_KEY'));
+        expect(error.userMessage, 'Your session has ended. Please sign in again.');
+      });
+
+      test('a used-up daily transcription limit has its own message',
+          () async {
+        final error = await errorFor(http.Response(
+            jsonEncode({
+              'error': 'daily transcription limit reached',
+              'code': 'transcription_budget_exceeded',
+            }),
+            429,
+            headers: {'retry-after': '3600'}));
+        expect(error.code, transcriptionBudgetExceeded);
+        expect(error.isTranscriptionBudgetExceeded, isTrue);
+        expect(error.userMessage, startsWith('Today’s transcription limit is used up'));
+        expect(error.userMessage, isNot(contains('Too many requests')));
+        expect(error.toString(), contains('transcription_budget_exceeded'));
+
+        final other = await errorFor(http.Response(
+            jsonEncode({'error': 'slow down', 'code': 'rate_limited'}), 429,
+            headers: {'retry-after': '900'}));
+        expect(other.isTranscriptionBudgetExceeded, isFalse);
+        expect(other.userMessage, 'Too many requests, try again in 15 min.');
       });
 
       test('400 shows a readable server explanation only', () async {

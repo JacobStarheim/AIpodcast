@@ -130,7 +130,7 @@ class _PlayButton extends StatelessWidget {
         foregroundColor: AppColors.ink,
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 13),
       ),
-      onPressed: controller.canControlPlayback && episode.audioUrl.isNotEmpty
+      onPressed: controller.canControlPlayback && episode.playbackUrl.isNotEmpty
           ? controller.togglePlayback
           : null,
       icon: Icon(playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
@@ -154,6 +154,11 @@ class _TranscriptNote extends StatelessWidget {
     final status = controller.selectedEpisode!.transcriptionStatus;
     final requesting = controller.isTranscriptionRequested(episode.id);
     final reason = episode.transcriptionError;
+    final usage = controller.usage;
+    final minutes = (episode.durationSec ?? 0) / 60;
+    final tooLong = usage != null &&
+        !usage.isUsedUp &&
+        minutes > usage.remainingMinutes;
     final message = switch (status) {
       TranscriptionStatus.pending =>
         'Transcribe this episode to ask questions about it. You can listen meanwhile.',
@@ -197,6 +202,15 @@ class _TranscriptNote extends StatelessWidget {
                     ? 'Try transcribing again'
                     : 'Transcribe episode'),
           ),
+          if (usage != null) ...[
+            const SizedBox(height: 8),
+            Text(
+                tooLong
+                    ? '${usageLabel(usage)} This episode needs about ${minutesLabel(minutes)}.'
+                    : usageLabel(usage),
+                key: const ValueKey('usage-remaining'),
+                style: const TextStyle(color: Color(0xFFB9C4BA), fontSize: 12)),
+          ],
         ] else if (status.isInProgress) ...[
           const SizedBox(height: 10),
           const LinearProgressIndicator(

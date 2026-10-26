@@ -20,7 +20,8 @@
     "demo:serve": "node scripts/demo-server.mjs",
     "test:live": "node scripts/smoke-live.mjs",
     "eval": "node scripts/eval/run-eval.mjs",
-    "seed": "./scripts/seed.sh"
+    "seed": "./scripts/seed.sh",
+    "user:create": "node scripts/create-user.mjs"
   },
   "engines": {
     "node": ">=20.0.0"

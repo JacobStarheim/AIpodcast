@@ -50,7 +50,7 @@ class ConversationSection extends StatelessWidget {
         ],
         if (working) ...[
           if (turns.isNotEmpty) const SizedBox(height: 28),
-          _WorkingAnswer(question: pending),
+          _WorkingAnswer(question: pending, controller: controller),
         ] else if (pending != null) ...[
           if (turns.isNotEmpty) const SizedBox(height: 28),
           _QuestionHeader(question: pending),
@@ -211,22 +211,56 @@ class _QuestionHeader extends StatelessWidget {
       );
 }
 
+/// The question being answered: what the server is doing, and the answer
+/// text as it streams in. The final answer replaces it.
 class _WorkingAnswer extends StatelessWidget {
-  const _WorkingAnswer({this.question});
+  const _WorkingAnswer({this.question, required this.controller});
   final String? question;
+  final PodcastController controller;
+
   @override
-  Widget build(BuildContext context) => Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (question != null) ...[
-            _QuestionHeader(question: question!),
-            const SizedBox(height: 20),
-          ],
-          InlineProgress(question == null
-              ? 'Listening back to your question…'
-              : 'Finding the relevant moments…'),
+  Widget build(BuildContext context) {
+    final library = controller.scope == QuestionScope.library;
+    final label = question == null
+        ? 'Listening back to your question…'
+        : switch (controller.answerStage) {
+            AnswerStage.answering => 'Answering…',
+            _ => library ? 'Searching your library…' : 'Searching the episode…',
+          };
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (question != null) ...[
+          _QuestionHeader(question: question!),
+          const SizedBox(height: 20),
         ],
-      );
+        ValueListenableBuilder<String>(
+          valueListenable: controller.streamingAnswer,
+          builder: (context, text, _) => Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (question != null && text.isNotEmpty) ...[
+                Container(
+                  key: const ValueKey('streaming-answer'),
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(20),
+                  decoration: BoxDecoration(
+                      color: Colors.white,
+                      border: Border.all(color: AppColors.line),
+                      borderRadius: BorderRadius.circular(22)),
+                  child: Text(text,
+                      style: const TextStyle(
+                          fontSize: 16, height: 1.6, color: AppColors.ink)),
+                ),
+                const SizedBox(height: 14),
+              ],
+              InlineProgress(label, key: const ValueKey('answer-stage')),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
 }
 
 class _TurnView extends StatelessWidget {
@@ -282,7 +316,8 @@ class _TurnView extends StatelessWidget {
               ]),
               const SizedBox(height: 14),
               SelectableText(
-                  response.grounded
+                  // Refusals come in the language of the question.
+                  response.grounded || response.answerText.trim().isNotEmpty
                       ? response.answerText
                       : library
                           ? 'I couldn’t find enough detail in your transcribed episodes to answer that. Try asking about a topic they discuss.'
@@ -381,7 +416,7 @@ class _CitationCard extends StatelessWidget {
                     label: Text(
                         active
                             ? 'Pause'
-                            : 'Listen from ${timestampFromSeconds(citation.startSec)}',
+                            : 'Listen from ${timestampFromSeconds(citation.playFromSec)}',
                         style: const TextStyle(
                             fontSize: 13, fontWeight: FontWeight.w600)),
                   ),

@@ -39,7 +39,7 @@ function responsePayload(text: string, status = "completed") {
   };
 }
 
-function mockClient(payload: unknown) {
+function mockClient(payload: unknown, overrides: Partial<typeof config> & { planModel?: string } = {}) {
   const requests: Request[] = [];
   const sdk = new OpenAI({
     apiKey: config.apiKey,
@@ -54,7 +54,7 @@ function mockClient(payload: unknown) {
       });
     }
   });
-  return { client: new OpenAiClient(config, sdk), requests };
+  return { client: new OpenAiClient({ ...config, ...overrides }, sdk), requests };
 }
 
 describe("OpenAI adapter contracts", () => {
@@ -79,7 +79,10 @@ describe("OpenAI adapter contracts", () => {
 
   it("uses Responses strict output and returns grounded citations", async () => {
     const { client, requests } = mockClient(
-      responsePayload(JSON.stringify({ answerText: "Five listeners.", citationIndices: [0, 0] }))
+      responsePayload(JSON.stringify({
+        answerText: "Five listeners.",
+        citations: [{ index: 0, quote: "The team decided" }, { index: 0, quote: "again" }]
+      }))
     );
     const answer = await client.answerGrounded({
       questionText: "How many listeners?",
@@ -88,7 +91,7 @@ describe("OpenAI adapter contracts", () => {
       episodeSummary: "A prototype review."
     });
 
-    expect(answer).toEqual({ answerText: "Five listeners.", citationIndices: [0] });
+    expect(answer).toEqual({ answerText: "Five listeners.", citations: [{ index: 0, quote: "The team decided" }] });
     expect(requests[0]?.url).toBe("https://api.openai.com/v1/responses");
     const body = await requests[0]!.json();
     expect(body.model).toBe("gpt-6-luna");
@@ -102,11 +105,23 @@ describe("OpenAI adapter contracts", () => {
     expect(body.input[1].content).toContain("[0] passage episode=\"A real topic\" time=0:12-0:20");
     expect(body.input[1].content).toContain("Listener: Who tested it?\nAssistant: The team.");
     expect(body.input[1].content).toContain("Episode overview:\nA prototype review.");
+    expect(body.input[1].content).not.toContain("Question language");
+  });
+
+  it("names the question's language for the answer", async () => {
+    const { client, requests } = mockClient(
+      responsePayload(JSON.stringify({ answerText: "Rutile.", citations: [{ index: 0, quote: "x" }] }))
+    );
+    await client.answerGrounded({
+      questionText: "What mineral?", questionLanguage: "en", evidence: [segment], history: [], episodeSummary: null
+    });
+    const body = await requests[0]!.json();
+    expect(body.input[1].content).toContain("Question:\nWhat mineral?\n\nQuestion language: English (en)");
   });
 
   it("removes chunk numbers the model puts in the answer text", async () => {
     const { client } = mockClient(
-      responsePayload(JSON.stringify({ answerText: "Five listeners [0]. Then more [0, 1].", citationIndices: [0] }))
+      responsePayload(JSON.stringify({ answerText: "Five listeners [0]. Then more [0, 1].", citations: [{ index: 0, quote: "" }] }))
     );
     const answer = await client.answerGrounded({ questionText: "Q", evidence: [segment], history: [], episodeSummary: null });
     expect(answer.answerText).toBe("Five listeners. Then more.");
@@ -116,21 +131,22 @@ describe("OpenAI adapter contracts", () => {
     "{}",
     "null",
     "not JSON",
-    '{"answerText":"Unsupported claim.","citationIndices":[]}',
-    '{"answerText":"Unsupported claim.","citationIndices":[0,1.5]}',
-    '{"answerText":"Unsupported claim.","citationIndices":[-1,0]}',
-    '{"answerText":"Unsupported claim.","citationIndices":[7]}'
+    '{"answerText":"Unsupported claim.","citations":[]}',
+    '{"answerText":"Unsupported claim.","citations":[{"index":1.5,"quote":""}]}',
+    '{"answerText":"Unsupported claim.","citations":[{"index":-1,"quote":""}]}',
+    '{"answerText":"Unsupported claim.","citations":[{"index":7,"quote":""}]}',
+    '{"answerText":"Old format.","citationIndices":[0]}'
   ])("refuses unusable or uncited model output: %s", async (output) => {
     const { client } = mockClient(responsePayload(output));
     expect(await client.answerGrounded({ questionText: "Question", evidence: [segment], history: [], episodeSummary: null })).toEqual({
       answerText: "",
-      citationIndices: []
+      citations: []
     });
   });
 
   it("does not accept a truncated response even if its partial text is valid JSON", async () => {
     const { client } = mockClient(
-      responsePayload('{"answerText":"Five listeners.","citationIndices":[0]}', "incomplete")
+      responsePayload('{"answerText":"Five listeners.","citations":[{"index":0,"quote":""}]}', "incomplete")
     );
     await expect(client.answerGrounded({ questionText: "Question", evidence: [segment], history: [], episodeSummary: null })).rejects.toThrow(
       "did not finish"
@@ -141,14 +157,14 @@ describe("OpenAI adapter contracts", () => {
     const { client, requests } = mockClient({});
     expect(await client.answerGrounded({ questionText: "Question", evidence: [], history: [], episodeSummary: null })).toEqual({
       answerText: "",
-      citationIndices: []
+      citations: []
     });
     expect(requests).toHaveLength(0);
   });
 
   it("labels just-heard passages and chapters for the model", async () => {
     const { client, requests } = mockClient(
-      responsePayload(JSON.stringify({ answerText: "They meant the pilot.", citationIndices: [0] }))
+      responsePayload(JSON.stringify({ answerText: "They meant the pilot.", citations: [{ index: 0, quote: "" }] }))
     );
     await client.answerGrounded({
       questionText: "What did they just mean?",
@@ -167,7 +183,7 @@ describe("OpenAI adapter contracts", () => {
 
   it("plans translated, standalone search queries", async () => {
     const { client, requests } = mockClient(
-      responsePayload(JSON.stringify({ queries: ["  how many sensors Aurora ", "", 42], overview: false }))
+      responsePayload(JSON.stringify({ queries: ["  how many sensors Aurora ", "", 42], overview: false, language: "nb" }))
     );
     const plan = await client.planSearch({
       questionText: "Hvor mange har den?",
@@ -175,7 +191,7 @@ describe("OpenAI adapter contracts", () => {
       transcriptLanguages: ["en"],
       episodeTitle: "Aurora voyage"
     });
-    expect(plan).toEqual({ queries: ["how many sensors Aurora"], overview: false });
+    expect(plan).toEqual({ queries: ["how many sensors Aurora"], overview: false, language: "nb" });
     const body = await requests[0]!.json();
     expect(body.text.format.name).toBe("podcast_search_plan");
     expect(body.input[1].content).toContain("Transcript language: en");
@@ -196,5 +212,41 @@ describe("OpenAI adapter contracts", () => {
   it("fails explicitly if embeddings are missing instead of querying with an empty vector", async () => {
     const { client } = mockClient({ data: [] });
     await expect(client.embedTexts(["Question"])).rejects.toThrow("invalid embedding");
+  });
+
+  it("streams the answer text from server-sent events and returns the parsed answer", async () => {
+    const json = JSON.stringify({ answerText: "Five [0] listeners.", citations: [{ index: 0, quote: "The team" }] });
+    const pieces = [json.slice(0, 20), json.slice(20, 23), json.slice(23)];
+    const events = [
+      { type: "response.created", response: { id: "r", status: "in_progress", output: [] } },
+      ...pieces.map((delta) => ({ type: "response.output_text.delta", delta, item_id: "m", output_index: 0, content_index: 0 })),
+      { type: "response.completed", response: { id: "r", status: "completed", output: [] } }
+    ];
+    const body = events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join("");
+    const sdk = new OpenAI({
+      apiKey: "test-key",
+      maxRetries: 0,
+      fetch: async (url) => String(url) === "data:,"
+        ? new Response("")
+        : new Response(body, { headers: { "content-type": "text/event-stream" } })
+    });
+    const client = new OpenAiClient(config, sdk);
+    const deltas: string[] = [];
+    const answer = await client.answerGrounded({
+      questionText: "Q", evidence: [segment], history: [], episodeSummary: null, onDelta: (text) => deltas.push(text)
+    });
+    expect(deltas.join("")).toBe("Five listeners.");
+    expect(answer).toEqual({ answerText: "Five listeners.", citations: [{ index: 0, quote: "The team" }] });
+  });
+
+  it("only sends a reasoning effort to reasoning models", async () => {
+    const plan = responsePayload(JSON.stringify({ queries: [], overview: false, language: "en" }));
+    for (const [planModel, expected] of [["gpt-5.4-nano", { effort: "low" }], ["gpt-4.1-mini", undefined]] as const) {
+      const { client, requests } = mockClient(plan, { planModel });
+      await client.planSearch({ questionText: "Q", history: [], transcriptLanguages: [], episodeTitle: null });
+      const body = await requests[0]!.json();
+      expect(body.model).toBe(planModel);
+      expect(body.reasoning).toEqual(expected);
+    }
   });
 });

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models.dart';
 import '../podcast_controller.dart';
+import '../sources_controller.dart';
 import 'app_theme.dart';
 import 'common.dart';
 import 'episode_art.dart';
@@ -29,13 +30,17 @@ class _LibrarySheetState extends State<LibrarySheet> {
 
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
-        animation: Listenable.merge(
-            [widget.controller, widget.controller.sources]),
+        animation:
+            Listenable.merge([widget.controller, widget.controller.sources]),
         builder: (context, _) {
           final controller = widget.controller;
           final episodes = controller.episodes;
           final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
           final error = controller.error;
+          final filteredSource = controller.sourceFilter == null
+              ? null
+              : controller.sources.sourceById(controller.sourceFilter!);
+          final usage = controller.usage;
           final libraryError = error != null &&
               (error.kind == ErrorKind.library ||
                   error.kind == ErrorKind.transcription);
@@ -90,6 +95,41 @@ class _LibrarySheetState extends State<LibrarySheet> {
                     ),
                   )),
                   SliverToBoxAdapter(child: _Filters(controller: controller)),
+                  if (filteredSource != null)
+                    SliverToBoxAdapter(
+                      child: PodcastSettingsCard(
+                          source: filteredSource, sources: controller.sources),
+                    ),
+                  if (usage != null)
+                    SliverToBoxAdapter(
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(24, 0, 24, 12),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Icon(
+                                usage.isUsedUp
+                                    ? Icons.hourglass_empty_rounded
+                                    : Icons.hourglass_bottom_rounded,
+                                size: 14,
+                                color: usage.isUsedUp
+                                    ? AppColors.orange
+                                    : AppColors.muted),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(usageLabel(usage),
+                                  key: const ValueKey('library-usage'),
+                                  style: TextStyle(
+                                      fontSize: 12,
+                                      height: 1.4,
+                                      color: usage.isUsedUp
+                                          ? AppColors.orange
+                                          : AppColors.muted)),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
                   SliverToBoxAdapter(
                       child: _ImportNotices(controller: controller)),
                   if (libraryError)
@@ -232,6 +272,76 @@ class _Filters extends StatelessWidget {
   }
 }
 
+/// Settings of the podcast the library is filtered by: automatic
+/// transcription of new episodes, and when the feed was last checked.
+class PodcastSettingsCard extends StatelessWidget {
+  const PodcastSettingsCard(
+      {super.key, required this.source, required this.sources});
+  final SourceSummary source;
+  final SourcesController sources;
+
+  @override
+  Widget build(BuildContext context) {
+    final saving = sources.isSavingSettings(source.id);
+    final error = sources.settingsErrors[source.id];
+    final refreshed = source.lastRefreshedAt?.toLocal();
+    final checked = refreshed == null
+        ? 'Not checked for new episodes yet.'
+        : 'Checked for new episodes ${recentLabel(refreshed, DateTime.now()) ?? 'on ${MaterialLocalizations.of(context).formatMediumDate(refreshed)}'}.';
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(24, 0, 24, 12),
+      // A Material, so the switch's ink shows on the tinted card.
+      child: Material(
+        color: AppColors.sage,
+        borderRadius: BorderRadius.circular(18),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 8, 12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(source.name,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      fontWeight: FontWeight.w700, fontSize: 14)),
+              SwitchListTile(
+                key: ValueKey('auto-transcribe-${source.id}'),
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Transcribe new episodes automatically',
+                    style:
+                        TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                subtitle: const Text(
+                    'New episodes are transcribed automatically, within the daily limit.',
+                    style: TextStyle(fontSize: 12, color: AppColors.muted)),
+                value: source.autoTranscribe,
+                onChanged: saving
+                    ? null
+                    : (value) => sources.setAutoTranscribe(source.id, value),
+              ),
+              Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: Text(checked,
+                    style:
+                        const TextStyle(fontSize: 12, color: AppColors.muted)),
+              ),
+              if (error != null) ...[
+                const SizedBox(height: 6),
+                Semantics(
+                  liveRegion: true,
+                  child: Text(error,
+                      key: ValueKey('auto-transcribe-error-${source.id}'),
+                      style: const TextStyle(
+                          fontSize: 12, color: AppColors.orange)),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// Podcasts whose episode list is still importing, or failed to import.
 class _ImportNotices extends StatelessWidget {
   const _ImportNotices({required this.controller});
@@ -282,7 +392,8 @@ class SourceImportStatus extends StatelessWidget {
       IngestJobStatus.failed => job?.error == null
           ? '${name}The feed couldn’t be imported.'
           : '${name}Import failed: ${job!.error}',
-      IngestJobStatus.completed || IngestJobStatus.unknown =>
+      IngestJobStatus.completed ||
+      IngestJobStatus.unknown =>
         '$name${source.episodeCount} ${source.episodeCount == 1 ? 'episode' : 'episodes'} in your library',
     };
     return Semantics(
@@ -348,8 +459,9 @@ class _LibraryEpisode extends StatelessWidget {
     final date = MaterialLocalizations.of(context)
         .formatMediumDate(episode.publishedAt.toLocal());
     final duration = episode.durationSec;
-    final failure =
-        status == TranscriptionStatus.failed ? episode.transcriptionError : null;
+    final failure = status == TranscriptionStatus.failed
+        ? episode.transcriptionError
+        : null;
     return Material(
       color: selected ? AppColors.sage : Colors.transparent,
       borderRadius: BorderRadius.circular(18),

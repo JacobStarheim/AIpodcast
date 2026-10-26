@@ -1,28 +1,38 @@
 # AI Podcast Voice Q&A
 
-A local Flutter app for listening to podcasts and asking questions about their
+A Flutter app for listening to podcasts and asking questions about their
 transcripts. Questions can be typed or recorded. Answers include playable
 citations and optional spoken playback.
 
 ## Listening and questions
 
-Find a podcast in the Apple Podcasts directory (or paste an RSS link) and add it
-to the library. The episode list is imported right away; choose **Transcribe** on
-an episode to have it transcribed and indexed, which takes a few minutes for a
-one-hour episode.
+Sign in with an account an administrator created (there is no sign-up). Find a
+podcast in the Apple Podcasts directory (or paste an RSS link) and add it to the
+library. The episode list is imported right away; choose **Transcribe** on an
+episode to have it transcribed and indexed, which takes one to two minutes for a
+one-hour episode. With **Transcribe new episodes automatically** turned on for a
+podcast, new episodes are transcribed as they appear. Every feed is read again
+hourly, and a daily limit on transcribed minutes keeps the cost predictable.
 
 The player has play/pause, a progress bar with seeking, and remembers where you
-stopped in each episode. Ask while you listen: the question is sent with the
-current position, playback pauses, and the transcript you heard during the last
-90 seconds is part of the evidence, so "what did they mean just now?" works.
-Playback resumes after the answer.
+stopped in each episode. It keeps playing in the background and on the lock
+screen, with controls there and on headsets. The app plays the exact audio file
+that was transcribed, kept by the server, because many podcasts insert different
+ads into each download and the publisher's file would not match the transcript
+times.
+
+Ask while you listen: the question is sent with the current position, playback
+pauses, and the transcript you heard during the last 90 seconds is part of the
+evidence, so "what did they mean just now?" works. Playback resumes after the
+answer. The answer appears while it is being written.
 
 Questions can cover one episode or the whole library. Follow-up questions keep
-the conversation, so "and what did she say about that?" is understood. Ready
-episodes also get a summary and chapters, which answer overview questions such as
-"what is this episode about?". Answers show source excerpts and chapters; choose
-**Listen from** to hear the cited passage. For voice input, tap to record and tap
-again to send, or hold while speaking; cancel is available during recording.
+the conversation, so "and what did she say about that?" is understood, and
+conversations are still there after the app restarts. Ready episodes also get a
+summary and chapters, which answer overview questions such as "what is this
+episode about?". Answers show source excerpts and chapters; choose **Listen
+from** to hear the cited passage. For voice input, tap to record and tap again to
+send, or hold while speaking; cancel is available during recording.
 
 The backend imports RSS episodes, transcribes their audio, stores embeddings in
 PostgreSQL with pgvector, and retrieves evidence for each question. Its current
@@ -31,7 +41,8 @@ model configuration is:
 | Purpose | Model | Integration |
 | --- | --- | --- |
 | Episode and question transcription | `gpt-transcribe` | Audio Transcriptions API |
-| Search planning, answers, summaries | `gpt-6-luna` | Responses API with strict JSON schemas |
+| Rewriting questions into search queries | `gpt-5.4-mini` | Responses API with a strict JSON schema |
+| Answers, summaries | `gpt-6-luna` | Responses API with strict JSON schemas, answers streamed |
 | Spoken answers | `gpt-realtime-2.1-mini` | Realtime audio, returned to the app as WAV |
 | Search embeddings | `text-embedding-3-small` | 1536-dimensional vectors |
 
@@ -41,11 +52,14 @@ model configuration is:
    refuses private network addresses unless explicitly allowed.
 2. FFmpeg finds pauses and cuts the audio into clips of about 20 seconds (10–30),
    ending in a pause where possible so words are not split between requests.
-3. Clips are transcribed four at a time. Citation times are the real clip
-   boundaries: they identify a short passage, not the exact word.
+3. Clips are transcribed four at a time. The request includes the podcast and
+   episode title and the names found in the episode description, which helps
+   with the spelling of names. Passage times are the real clip boundaries.
 4. Each passage is embedded together with the end of the previous and the start
    of the next passage, in batched requests, and stored with a full-text index.
 5. The model writes a summary and chapters with start times.
+6. The downloaded file is kept (`AUDIO_STORAGE_DIR`) and the app plays it
+   through signed links that expire after 12 hours.
 
 A failed episode is retried by later imports up to three times. Permanent
 failures, such as a missing file or audio above the size limit, are not retried
@@ -58,16 +72,18 @@ the app tries again.
    including a translation into the transcript language (for example a Norwegian
    question about an English episode). This runs while the question as asked is
    searched; a first question that already matches a passage closely is answered
-   without waiting for it. `OPENAI_PLAN_MODEL` can point the rewrite at a faster
-   model.
-2. Vector search (HNSW) and keyword search run for every query and are merged by
-   reciprocal rank fusion.
-3. The passages just heard, the retrieved passages, and the episode's chapters
-   go to the answer model, which must cite them.
+   without waiting for it.
+2. Vector search (HNSW) and keyword search (on word stems, so "fjorden" also
+   finds "fjordene") run for every query and are merged by reciprocal rank fusion.
+3. The passages just heard, the retrieved passages with their neighbours, and
+   the episode's chapters go to the answer model. It cites passages with a short
+   quote, which places **Listen from** a few seconds before the quoted words
+   instead of at the start of the passage.
 4. If no passage is similar enough, nothing matches the keywords, nothing was
    just heard, and the question is not about the episode as a whole, the API
    refuses without calling the answer model. Answers without a valid citation
-   are refused too. These checks do not guarantee that every claim is correct.
+   are refused too. Answers and refusals are in the language of the question.
+   These checks do not guarantee that every claim is correct.
 
 ## Local setup
 
@@ -98,12 +114,20 @@ npm run db:up
 `infrastructure/migrations`. After pulling new changes, run `npm run db:migrate`;
 the API and worker refuse to start on an outdated schema.
 
-Set `OPENAI_API_KEY` in both backend `.env` files. Set `ADMIN_KEY` and
-`APP_API_KEY` in the API environment. Every app request must send
-`Authorization: Bearer <APP_API_KEY>`; debug builds of the Flutter app send
-`dev-app-key`, which matches the example. Keep OpenAI keys in the backend
-environment. If the media tools are elsewhere, set `FFMPEG_PATH` and
-`FFPROBE_PATH` in the worker environment.
+Set `OPENAI_API_KEY` in both backend `.env` files and `ADMIN_KEY` in the API
+environment. Keep OpenAI keys in the backend environment. If the media tools are
+elsewhere, set `FFMPEG_PATH` and `FFPROBE_PATH` in the worker environment.
+
+Create an account to sign in to the app with. The password is read from the
+environment so it does not end up in the shell history:
+
+```bash
+read -rs USER_PASSWORD && export USER_PASSWORD
+npm run user:create -- --email you@example.com --name "Your Name" --admin
+```
+
+`APP_API_KEY` is an optional service token for the scripts (live test, eval).
+The example sets `dev-app-key`; leave it empty on a server that others can reach.
 
 The example worker environment sets `ALLOW_PRIVATE_NETWORK_FEEDS=true` so the
 local demo feed on `127.0.0.1` can be imported. Set it to `false` when other
@@ -127,6 +151,10 @@ The API listens on port 4000. Verify database access as well as HTTP startup:
 curl --fail http://localhost:4000/health
 curl --fail -H 'Authorization: Bearer dev-app-key' http://localhost:4000/v1/sources
 ```
+
+The worker reads every feed again each hour (`FEED_REFRESH_MINUTES`) and
+transcribes at most `DAILY_TRANSCRIPTION_MINUTES` (180 by default) of audio per
+UTC day, counting both requested and automatic transcriptions.
 
 The HTTP API is described in [docs/api.md](docs/api.md).
 
@@ -180,13 +208,17 @@ flutter run -d <ios-simulator-id>
 ```
 
 The iOS default API URL is `http://localhost:4000`. Use `flutter devices` to find
-device IDs. Pass `--dart-define=API_KEY=<APP_API_KEY>` when the API does not use
-`dev-app-key`; release builds have no default key. Allow microphone access for
-recorded questions; typed questions work without it. Keep the demo server
-running for demo playback.
+device IDs. Sign in with the account created above. Allow microphone access for
+recorded questions; typed questions work without it.
 
-Physical devices need reachable API and audio URLs; the included demo server
-serves loopback only. See the [mobile README](apps/mobile_flutter/README.md).
+Physical devices need an API they can reach. See the
+[mobile README](apps/mobile_flutter/README.md).
+
+### Run it on a server
+
+[docs/deploy.md](docs/deploy.md) sets up the API, worker and database with
+Docker Compose behind Caddy, which gets an HTTPS certificate automatically. The
+app is then built with `--dart-define=API_BASE_URL=https://your-domain`.
 
 ### Import your own podcast
 
@@ -222,13 +254,16 @@ flutter test
 configured server, applies the migrations twice (the second run must change
 nothing), and runs the database suites (`*.db.test.ts`) against real
 PostgreSQL. `npm test` skips those suites. GitHub Actions runs all of the above
-on every push and pull request ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
+on every push and pull request ([.github/workflows/ci.yml](.github/workflows/ci.yml)),
+and `main` only accepts changes whose checks passed.
 
 To measure answer quality on a real episode, transcribe it and run a question
-set with known answers (paid model calls):
+set with known answers (paid model calls). There is an English and a Norwegian
+set:
 
 ```bash
 npm run eval -- --dataset scripts/eval/datasets/hard-fork-holmes.json
+npm run eval -- --dataset scripts/eval/datasets/forklart-fordefjorden.json
 ```
 
 See [docs/verification.md](docs/verification.md) for what has been verified and
@@ -240,7 +275,7 @@ the limits of these checks.
 - `apps/api`: HTTP API, podcast search, retrieval, answer generation, voice input and output.
 - `apps/worker`: RSS ingestion, audio segmentation, transcription, embeddings and summaries.
 - `packages/shared-types`: shared TypeScript API contracts and the schema version.
-- `infrastructure`: PostgreSQL/pgvector Compose service and migrations.
-- `scripts`: migrations, database tests, deterministic demo, live smoke test and RSS seed helper.
+- `infrastructure`: PostgreSQL/pgvector Compose services (local and production), Caddy and migrations.
+- `scripts`: migrations, database tests, accounts, deterministic demo, live smoke test, eval and RSS seed helper.
 
 See [RUNBOOK.md](RUNBOOK.md) for operational checks and recovery.

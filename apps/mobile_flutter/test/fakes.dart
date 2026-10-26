@@ -7,6 +7,9 @@ import 'package:podcast_voice_ai/models.dart';
 import 'package:podcast_voice_ai/podcast_api.dart';
 import 'package:podcast_voice_ai/voice_recorder.dart';
 
+/// What the fakes play for an episode: never its publisher [audioUrl].
+String playbackUrlOf(String episodeId) => 'https://media.example/$episodeId.mp3';
+
 EpisodeSummary demoEpisode(
   String id, {
   String? title,
@@ -25,6 +28,7 @@ EpisodeSummary demoEpisode(
       description: 'About $id',
       publishedAt: DateTime.parse('2025-01-01T00:00:00Z'),
       audioUrl: 'https://example.com/$id.mp3',
+      playbackUrl: playbackUrlOf(id),
       transcriptionStatus: status,
       transcriptionError: transcriptionError,
       imageUrl: imageUrl,
@@ -39,6 +43,8 @@ SourceSummary demoSource(
   int episodes = 12,
   int ready = 1,
   String? rssUrl,
+  bool autoTranscribe = false,
+  DateTime? lastRefreshedAt,
 }) =>
     SourceSummary(
       id: id,
@@ -47,6 +53,8 @@ SourceSummary demoSource(
       episodeCount: episodes,
       readyEpisodeCount: ready,
       lastJob: job == null ? null : IngestJob(status: job, error: jobError),
+      autoTranscribe: autoTranscribe,
+      lastRefreshedAt: lastRefreshedAt,
     );
 
 typedef AddRequest = ({String rssUrl, String? name, String? imageUrl});
@@ -70,10 +78,26 @@ class FakeApi implements PodcastApi {
 
   /// Statuses returned by successive getEpisode calls; the last one sticks.
   final Map<String, List<TranscriptionStatus>> statusSequence = {};
+
+  /// Playback links returned by successive getEpisode calls; the last one
+  /// sticks. Defaults to [playbackUrlOf].
+  final Map<String, List<String>> playbackUrlSequence = {};
   final Map<String, EpisodeDetail> details = {};
 
   int transcribeCalls = 0;
   Object? transcribeError;
+
+  TranscriptionUsage? usage = TranscriptionUsage(
+      date: '2026-10-26',
+      usedMinutes: 60,
+      limitMinutes: 180,
+      remainingMinutes: 120);
+  int usageCalls = 0;
+  Object? usageError;
+
+  final List<({String sourceId, bool autoTranscribe})> sourceUpdates = [];
+  Object? updateSourceError;
+  Completer<void>? updateSourceGate;
 
   List<SourceSummary> sources = [demoSource('src1', 'Demo')];
 
@@ -98,8 +122,27 @@ class FakeApi implements PodcastApi {
   List<QaTurn> lastHistory = const [];
   int? lastTopK;
   String? citationEpisodeId;
+  double? citationPlayFromSec;
   Completer<void>? questionGate;
   Completer<void>? transcriptionGate;
+
+  /// The episode a voice question was transcribed for.
+  String? lastVoiceEpisodeId;
+
+  /// Holds the stream after its status events, before any answer text.
+  Completer<void>? beforeDeltas;
+
+  /// Holds the stream after the answer text, before the final answer.
+  Completer<void>? beforeDone;
+
+  /// Ends the stream with an `error` event after some text.
+  String? streamError;
+
+  /// Streams answer text, then a refusal as the final answer.
+  bool refuseAfterDeltas = false;
+
+  /// Ends the stream without a final answer.
+  bool truncateStream = false;
 
   @override
   Future<EpisodePage> listEpisodes({
@@ -145,6 +188,14 @@ class FakeApi implements PodcastApi {
     return TranscriptionStatus.ready;
   }
 
+  String _playbackUrlOf(String episodeId) {
+    final sequence = playbackUrlSequence[episodeId];
+    if (sequence != null && sequence.isNotEmpty) {
+      return sequence.length > 1 ? sequence.removeAt(0) : sequence.first;
+    }
+    return playbackUrlOf(episodeId);
+  }
+
   @override
   Future<EpisodeDetailEnvelope> getEpisode(String episodeId) async {
     episodeCalls[episodeId] = (episodeCalls[episodeId] ?? 0) + 1;
@@ -157,6 +208,7 @@ class FakeApi implements PodcastApi {
               transcriptionError: override.transcriptionError),
           transcriptionStatus: status);
     }
+    final playbackUrl = _playbackUrlOf(episodeId);
     return EpisodeDetailEnvelope(
       episode: EpisodeDetail(
         id: episodeId,
@@ -167,11 +219,36 @@ class FakeApi implements PodcastApi {
         description: 'description',
         publishedAt: DateTime.parse('2025-01-01T00:00:00Z'),
         audioUrl: 'https://example.com/$episodeId.mp3',
+        playbackUrl: playbackUrl,
         transcriptionStatus: status,
         durationSec: 900,
       ),
       transcriptionStatus: status,
     );
+  }
+
+  @override
+  Future<TranscriptionUsage> getUsage() async {
+    usageCalls += 1;
+    final error = usageError;
+    if (error != null) throw error;
+    final current = usage;
+    if (current == null) throw Exception('usage unavailable');
+    return current;
+  }
+
+  @override
+  Future<SourceSummary> updateSource(String sourceId,
+      {required bool autoTranscribe}) async {
+    sourceUpdates.add((sourceId: sourceId, autoTranscribe: autoTranscribe));
+    await updateSourceGate?.future;
+    final error = updateSourceError;
+    if (error != null) throw error;
+    final index = sources.indexWhere((source) => source.id == sourceId);
+    if (index < 0) throw ApiException(statusCode: 404);
+    final updated = sources[index].copyWith(autoTranscribe: autoTranscribe);
+    sources = [...sources]..[index] = updated;
+    return updated;
   }
 
   @override
@@ -227,38 +304,23 @@ class FakeApi implements PodcastApi {
   }
 
   @override
-  Future<TranscriptionResult> transcribeVoiceFile(String audioPath) async {
+  Future<TranscriptionResult> transcribeVoiceFile(String audioPath,
+      {String? episodeId}) async {
     transcriptionCalls += 1;
+    lastVoiceEpisodeId = episodeId;
     await transcriptionGate?.future;
     return TranscriptionResult(text: 'What was discussed?', durationMs: 1500);
   }
 
-  @override
-  Future<QaResponse> askQuestion({
-    required String questionText,
-    String? episodeId,
-    double? positionSec,
-    List<QaTurn> history = const <QaTurn>[],
-    int topK = 10,
-  }) async {
-    questionCalls += 1;
-    askedWithEpisode = episodeId != null;
-    lastQuestionEpisode = episodeId;
-    lastQuestionText = questionText;
-    lastPositionSec = positionSec;
-    lastHistory = List.of(history);
-    lastTopK = topK;
-    await questionGate?.future;
-    if (failQuestion) throw Exception('question unavailable');
-    if (refuseAnswer) {
-      return QaResponse(
+  QaResponse get refusal => QaResponse(
         answerText:
             'I do not have enough transcript evidence to answer that confidently.',
         citations: const <Citation>[],
         grounded: false,
         refusalReason: 'insufficient_retrieval_confidence',
       );
-    }
+
+  QaResponse groundedAnswer(String? episodeId) {
     final cited = citationEpisodeId ?? episodeId ?? 'ep2';
     return QaResponse(
       answerText: 'The host discussed architecture and citations.',
@@ -269,12 +331,49 @@ class FakeApi implements PodcastApi {
           episodeTitle: 'Episode $cited',
           startSec: 120,
           endSec: 140,
+          playFromSec: citationPlayFromSec,
           text: 'Architecture and citations were discussed.',
           score: 0.88,
         ),
       ],
       grounded: true,
     );
+  }
+
+  @override
+  Stream<QaStreamEvent> askQuestionStream({
+    required String questionText,
+    String? episodeId,
+    double? positionSec,
+    List<QaTurn> history = const <QaTurn>[],
+    int topK = 10,
+  }) async* {
+    questionCalls += 1;
+    askedWithEpisode = episodeId != null;
+    lastQuestionEpisode = episodeId;
+    lastQuestionText = questionText;
+    lastPositionSec = positionSec;
+    lastHistory = List.of(history);
+    lastTopK = topK;
+    await questionGate?.future;
+    if (failQuestion) throw Exception('question unavailable');
+    yield const QaStatusEvent(AnswerStage.searching);
+    yield const QaStatusEvent(AnswerStage.answering);
+    await beforeDeltas?.future;
+    final answer = refuseAnswer ? refusal : groundedAnswer(episodeId);
+    final error = streamError;
+    if (error != null) {
+      yield const QaDeltaEvent('The host ');
+      yield QaErrorEvent(error, requestId: 'req-stream');
+      return;
+    }
+    if (!refuseAnswer || refuseAfterDeltas) {
+      yield const QaDeltaEvent('The host discussed ');
+      yield const QaDeltaEvent('architecture');
+    }
+    await beforeDone?.future;
+    if (truncateStream) return;
+    yield QaDoneEvent(refuseAfterDeltas ? refusal : answer);
   }
 
   @override
@@ -313,6 +412,14 @@ class FakeRecorder implements VoiceRecorder {
 class FakeAudioOutput implements AudioOutput {
   final StreamController<EpisodeProgress> _progress =
       StreamController<EpisodeProgress>.broadcast(sync: true);
+  final StreamController<RemoteCommand> _remote =
+      StreamController<RemoteCommand>.broadcast(sync: true);
+
+  /// What playEpisode was asked to show on the lock screen.
+  EpisodeMedia? lastMedia;
+
+  /// Links that fail to load, like an expired signed link.
+  final Set<String> failingUrls = {};
 
   /// Calls in order, e.g. `play https://example.com/ep1.mp3@0`, `pause`.
   final List<String> events = [];
@@ -338,6 +445,12 @@ class FakeAudioOutput implements AudioOutput {
   @override
   Stream<EpisodeProgress> get episodeProgress => _progress.stream;
 
+  @override
+  Stream<RemoteCommand> get remoteCommands => _remote.stream;
+
+  /// A command from the lock screen, notification or headset.
+  void remote(RemoteCommand command) => _remote.add(command);
+
   /// Reports player progress for the loaded episode.
   void emit(Duration at,
       {bool playing = true, bool completed = false, Duration? duration}) {
@@ -359,11 +472,15 @@ class FakeAudioOutput implements AudioOutput {
   }
 
   @override
-  Future<void> playEpisode(String url, {Duration? seekTo}) async {
+  Future<void> playEpisode(String url,
+      {Duration? seekTo, EpisodeMedia? media}) async {
     playCalls += 1;
     events.add('play $url@${seekTo?.inMilliseconds}');
+    lastMedia = media;
     _endSpeech();
-    if (failEpisodePlayback) throw Exception('audio unavailable');
+    if (failEpisodePlayback || failingUrls.contains(url)) {
+      throw Exception('audio unavailable');
+    }
     lastEpisodeUrl = url;
     lastSeek = seekTo;
     if (seekTo != null) position = seekTo;
@@ -414,5 +531,46 @@ class FakeAudioOutput implements AudioOutput {
   @override
   Future<void> dispose() async {
     await _progress.close();
+    await _remote.close();
+  }
+}
+
+class FakeAuthApi implements AuthApi {
+  static const password = 'correct horse battery';
+  User user =
+      const User(id: 'u1', email: 'ada@example.com', name: 'Ada Lovelace');
+  int loginCalls = 0;
+  int meCalls = 0;
+  int _tokens = 0;
+  final List<String> loggedOut = [];
+  Object? loginError;
+  Object? meError;
+  Completer<void>? loginGate;
+  DateTime expiresAt = DateTime.utc(2099);
+
+  @override
+  Future<LoginResult> login(
+      {required String email, required String password}) async {
+    loginCalls += 1;
+    await loginGate?.future;
+    final error = loginError;
+    if (error != null) throw error;
+    if (email != user.email || password != FakeAuthApi.password) {
+      throw ApiException(
+          statusCode: 401, serverMessage: 'invalid email or password');
+    }
+    return LoginResult(
+        token: 'token-${++_tokens}', user: user, expiresAt: expiresAt);
+  }
+
+  @override
+  Future<void> logout(String token) async => loggedOut.add(token);
+
+  @override
+  Future<User> me() async {
+    meCalls += 1;
+    final error = meError;
+    if (error != null) throw error;
+    return user;
   }
 }

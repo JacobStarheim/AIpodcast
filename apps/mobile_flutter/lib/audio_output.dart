@@ -2,8 +2,21 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:audio_service/audio_service.dart' show AudioProcessingState;
 import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
+
+import 'media_session.dart';
+
+export 'media_session.dart'
+    show
+        EpisodeMedia,
+        RemoteCommand,
+        RemotePause,
+        RemotePlay,
+        RemoteSeek,
+        RemoteSkip,
+        RemoteStop;
 
 /// State of the episode player for the episode at [url].
 class EpisodeProgress {
@@ -28,10 +41,14 @@ abstract class AudioOutput {
   /// Progress of the loaded episode. Playback failures arrive as errors.
   Stream<EpisodeProgress> get episodeProgress;
 
+  /// Play, pause and seek requests from the lock screen, notification and
+  /// headset. The app decides whether and how to follow them.
+  Stream<RemoteCommand> get remoteCommands;
+
   /// Loads [url] unless it is already loaded, moves to [seekTo] when given
-  /// and starts playback. Completes once playback has started; follow
-  /// [episodeProgress] for what happens next.
-  Future<void> playEpisode(String url, {Duration? seekTo});
+  /// and starts playback, showing [media] on the lock screen. Completes once
+  /// playback has started; follow [episodeProgress] for what happens next.
+  Future<void> playEpisode(String url, {Duration? seekTo, EpisodeMedia? media});
 
   /// Pauses the episode and returns the position it paused at.
   Future<Duration> pauseEpisode();
@@ -52,13 +69,26 @@ abstract class AudioOutput {
   Future<void> dispose();
 }
 
+/// Plays episodes and spoken answers with two just_audio players.
+///
+/// Only the episode player is mirrored to [mediaSession] (lock screen,
+/// notification, background playback); spoken answers pause the episode and
+/// play on their own player, so asking while listening keeps working.
 class JustAudioOutput implements AudioOutput {
-  JustAudioOutput({AudioPlayer? episodePlayer, AudioPlayer? ttsPlayer})
-      : _episodePlayer = episodePlayer ?? AudioPlayer(),
-        _ttsPlayer = ttsPlayer ?? AudioPlayer();
+  JustAudioOutput({
+    AudioPlayer? episodePlayer,
+    AudioPlayer? ttsPlayer,
+    PodcastMediaHandler? mediaSession,
+  })  : _episodePlayer = episodePlayer ?? AudioPlayer(),
+        _ttsPlayer = ttsPlayer ?? AudioPlayer(),
+        _media = mediaSession;
 
   final AudioPlayer _episodePlayer;
   final AudioPlayer _ttsPlayer;
+  final PodcastMediaHandler? _media;
+
+  /// What the lock screen shows; null while nothing is loaded.
+  EpisodeMedia? _shownMedia;
   late final StreamController<EpisodeProgress> _progress =
       StreamController<EpisodeProgress>.broadcast(
           onListen: _listenToPlayer, onCancel: _stopListening);
@@ -74,6 +104,10 @@ class JustAudioOutput implements AudioOutput {
   @override
   Stream<EpisodeProgress> get episodeProgress => _progress.stream;
 
+  @override
+  Stream<RemoteCommand> get remoteCommands =>
+      _media?.commands ?? const Stream<RemoteCommand>.empty();
+
   void _listenToPlayer() {
     _subscriptions.addAll([
       _episodePlayer.positionStream.listen((position) {
@@ -82,6 +116,9 @@ class JustAudioOutput implements AudioOutput {
       }),
       _episodePlayer.durationStream.listen((duration) {
         _duration = duration;
+        if (duration != null && _shownMedia != null) {
+          _media?.showDuration(duration);
+        }
         _emit();
       }),
       _episodePlayer.playerStateStream.listen((state) {
@@ -90,16 +127,31 @@ class JustAudioOutput implements AudioOutput {
         final justCompleted = completed && !_completed;
         _completed = completed;
         _emit();
+        _showPlaybackState(state.processingState);
         // just_audio keeps `playing` true after completion; pause so that a
         // later play request starts playback again.
         if (justCompleted) unawaited(_episodePlayer.pause());
       }),
-      _episodePlayer.playbackEventStream.listen((_) {},
+      _episodePlayer.playbackEventStream.listen(
+          (event) => _showPlaybackState(event.processingState),
           onError: (Object error, StackTrace stackTrace) {
         if (error is PlayerInterruptedException) return;
         if (!_progress.isClosed) _progress.addError(error, stackTrace);
       }),
     ]);
+  }
+
+  /// Mirrors the episode player to the lock screen and notification.
+  void _showPlaybackState(ProcessingState state) {
+    final media = _media;
+    if (media == null || _shownMedia == null) return;
+    media.showPlayback(
+      playing: _playing,
+      processingState: mediaProcessingState(state),
+      position: _episodePlayer.position,
+      bufferedPosition: _episodePlayer.bufferedPosition,
+      speed: _episodePlayer.speed,
+    );
   }
 
   Future<void> _stopListening() async {
@@ -123,8 +175,15 @@ class JustAudioOutput implements AudioOutput {
   }
 
   @override
-  Future<void> playEpisode(String url, {Duration? seekTo}) async {
+  Future<void> playEpisode(String url,
+      {Duration? seekTo, EpisodeMedia? media}) async {
     final generation = ++_generation;
+    if (media != null) {
+      _shownMedia = media;
+      // The player's own length beats the feed's estimate once it is known.
+      _media?.showEpisode(media,
+          duration: url == _currentEpisodeUrl ? _duration : null);
+    }
     await _ttsPlayer.stop();
     if (generation != _generation) return;
     if (_currentEpisodeUrl != url) {
@@ -198,7 +257,14 @@ class JustAudioOutput implements AudioOutput {
   @override
   Future<void> stop() async {
     ++_generation;
+    _hideMedia();
     await Future.wait([_episodePlayer.stop(), _ttsPlayer.stop()]);
+  }
+
+  void _hideMedia() {
+    if (_shownMedia == null) return;
+    _shownMedia = null;
+    _media?.showStopped();
   }
 
   Future<void> _deleteTtsFile() async {
@@ -210,6 +276,7 @@ class JustAudioOutput implements AudioOutput {
   @override
   Future<void> dispose() async {
     ++_generation;
+    _hideMedia();
     await _stopListening();
     await _progress.close();
     await _episodePlayer.dispose();
@@ -217,3 +284,12 @@ class JustAudioOutput implements AudioOutput {
     await _deleteTtsFile();
   }
 }
+
+AudioProcessingState mediaProcessingState(ProcessingState state) =>
+    switch (state) {
+      ProcessingState.idle => AudioProcessingState.idle,
+      ProcessingState.loading => AudioProcessingState.loading,
+      ProcessingState.buffering => AudioProcessingState.buffering,
+      ProcessingState.ready => AudioProcessingState.ready,
+      ProcessingState.completed => AudioProcessingState.completed,
+    };

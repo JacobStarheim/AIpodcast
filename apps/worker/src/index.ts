@@ -27,7 +27,10 @@ async function main() {
     maxTranscriptionAttempts: config.maxTranscriptionAttempts,
     allowPrivateNetwork: config.allowPrivateNetwork,
     maxChunkSec: config.audioChunkTargetSec * 1.5,
-    staleJobSec: config.staleJobSec
+    staleJobSec: config.staleJobSec,
+    audioStorageDirectory: config.audioStorageDirectory,
+    feedRefreshSec: config.feedRefreshSec,
+    dailyTranscriptionSec: config.dailyTranscriptionSec
   });
 
   let running = false;

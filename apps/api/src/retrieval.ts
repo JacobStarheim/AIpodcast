@@ -30,13 +30,27 @@ const STOPWORDS = new Set(
     .split(" ")
 );
 
-/** Distinctive words for keyword search: names, numbers and rarer terms. */
+/**
+ * Crude stem for keyword search: long words lose their last three letters so
+ * that inflected forms match ("driftsperioden" → "driftsperio" matches
+ * "driftsperiode", "planlagte" → "planla" matches "planlagt"). Used as a
+ * prefix; never shorter than six letters.
+ */
+export function stemPrefix(term: string): string {
+  if (/^\d+$/.test(term) || term.length <= 6) return term;
+  return term.slice(0, Math.max(6, term.length - 3));
+}
+
+/**
+ * Distinctive words for keyword search: names, numbers and rarer terms, as
+ * stem prefixes (see stemPrefix).
+ */
 export function searchTerms(texts: string[], maxTerms = 16): string[] {
   const terms = new Set<string>();
   for (const text of texts) {
     for (const match of text.toLocaleLowerCase().matchAll(/[\p{L}\p{N}]+/gu)) {
       const term = match[0];
-      if ((term.length >= 3 || /^\d+$/.test(term)) && !STOPWORDS.has(term)) terms.add(term);
+      if ((term.length >= 3 || /^\d+$/.test(term)) && !STOPWORDS.has(term)) terms.add(stemPrefix(term));
       if (terms.size >= maxTerms) return [...terms];
     }
   }
@@ -80,4 +94,30 @@ export function sanitizeHistory(value: unknown, maxTurns = 6, maxChars = 1000): 
     }))
     .filter((turn) => turn.question.length > 0)
     .slice(-maxTurns);
+}
+
+function normalizeForMatch(text: string): string {
+  return text.toLocaleLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Where to start playing for a quote from a passage. Passages last 10–30
+ * seconds without word timings, so the start is estimated from the quote's
+ * position in the text and moved a little earlier.
+ */
+export function estimatePlayFrom(
+  passage: { kind: string; startSec: number; endSec: number; text: string },
+  quote: string,
+  leadInSec = 1.5
+): number {
+  if (passage.kind !== "segment") return passage.startSec;
+  const text = normalizeForMatch(passage.text);
+  const words = normalizeForMatch(quote).split(" ").filter(Boolean);
+  let offset = -1;
+  for (let length = Math.min(6, words.length); length >= 2 && offset < 0; length -= 1) {
+    offset = text.indexOf(words.slice(0, length).join(" "));
+  }
+  if (offset <= 0) return passage.startSec;
+  const estimate = passage.startSec + (offset / text.length) * (passage.endSec - passage.startSec) - leadInSec;
+  return Math.round(Math.min(passage.endSec, Math.max(passage.startSec, estimate)) * 10) / 10;
 }

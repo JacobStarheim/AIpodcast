@@ -78,6 +78,12 @@ DateTime _date(Object? value) =>
 
 DateTime? _optionalDate(Object? value) => DateTime.tryParse(_string(value));
 
+/// Turns a URL from a response into one the app can open, e.g. a
+/// `playbackUrl` that is relative to the API origin.
+typedef UrlResolver = String Function(String url);
+
+String _keep(String url) => url;
+
 class EpisodeSummary {
   EpisodeSummary({
     required this.id,
@@ -88,10 +94,11 @@ class EpisodeSummary {
     required this.publishedAt,
     required this.audioUrl,
     required this.transcriptionStatus,
+    String? playbackUrl,
     this.imageUrl,
     this.durationSec,
     this.transcriptionError,
-  });
+  }) : playbackUrl = playbackUrl ?? audioUrl;
 
   final String id;
   final String sourceId;
@@ -99,7 +106,15 @@ class EpisodeSummary {
   final String title;
   final String description;
   final DateTime publishedAt;
+
+  /// The publisher's audio URL. Never played: see [playbackUrl].
   final String audioUrl;
+
+  /// What the app plays. For transcribed episodes this is the exact file that
+  /// was transcribed (a signed link that expires after 12 hours), so
+  /// transcript and citation times match it. Already resolved against the API
+  /// base URL; falls back to [audioUrl] for servers that do not send it.
+  final String playbackUrl;
   final TranscriptionStatus transcriptionStatus;
   final String? imageUrl;
   final int? durationSec;
@@ -108,10 +123,15 @@ class EpisodeSummary {
   final String? transcriptionError;
 
   /// Returns null when [json] has no episode id.
-  static EpisodeSummary? tryParse(Map<String, dynamic> json) =>
-      _string(json['id']).isEmpty ? null : EpisodeSummary.fromJson(json);
+  static EpisodeSummary? tryParse(Map<String, dynamic> json,
+          {UrlResolver resolveUrl = _keep}) =>
+      _string(json['id']).isEmpty
+          ? null
+          : EpisodeSummary.fromJson(json, resolveUrl: resolveUrl);
 
-  factory EpisodeSummary.fromJson(Map<String, dynamic> json) {
+  factory EpisodeSummary.fromJson(Map<String, dynamic> json,
+      {UrlResolver resolveUrl = _keep}) {
+    final audioUrl = _string(json['audioUrl']);
     return EpisodeSummary(
       id: _string(json['id']),
       sourceId: _string(json['sourceId']),
@@ -119,7 +139,8 @@ class EpisodeSummary {
       title: _string(json['title'], 'Untitled'),
       description: _string(json['description']),
       publishedAt: _date(json['publishedAt']),
-      audioUrl: _string(json['audioUrl']),
+      audioUrl: audioUrl,
+      playbackUrl: _playbackUrl(json, audioUrl, resolveUrl),
       transcriptionStatus:
           transcriptionStatusFromString(json['transcriptionStatus']),
       imageUrl: _optionalString(json['imageUrl']),
@@ -140,11 +161,18 @@ class EpisodeSummary {
         description: description,
         publishedAt: publishedAt,
         audioUrl: audioUrl,
+        playbackUrl: playbackUrl,
         transcriptionStatus: status,
         imageUrl: imageUrl,
         durationSec: durationSec,
         transcriptionError: transcriptionError,
       );
+}
+
+String _playbackUrl(
+    Map<String, dynamic> json, String audioUrl, UrlResolver resolveUrl) {
+  final url = _optionalString(json['playbackUrl'])?.trim();
+  return url == null || url.isEmpty ? audioUrl : resolveUrl(url);
 }
 
 class Chapter {
@@ -182,6 +210,7 @@ class EpisodeDetail extends EpisodeSummary {
     required super.publishedAt,
     required super.audioUrl,
     required super.transcriptionStatus,
+    super.playbackUrl,
     super.durationSec,
     super.imageUrl,
     super.transcriptionError,
@@ -199,9 +228,11 @@ class EpisodeDetail extends EpisodeSummary {
   /// Ordered by start time.
   final List<Chapter> chapters;
 
-  factory EpisodeDetail.fromJson(Map<String, dynamic> json) {
+  factory EpisodeDetail.fromJson(Map<String, dynamic> json,
+      {UrlResolver resolveUrl = _keep}) {
     final chapters = _list(json['chapters'], Chapter.fromJson)
       ..sort((a, b) => a.startSec.compareTo(b.startSec));
+    final audioUrl = _string(json['audioUrl']);
     return EpisodeDetail(
       id: _string(json['id']),
       sourceId: _string(json['sourceId']),
@@ -210,7 +241,8 @@ class EpisodeDetail extends EpisodeSummary {
       title: _string(json['title'], 'Untitled'),
       description: _string(json['description']),
       publishedAt: _date(json['publishedAt']),
-      audioUrl: _string(json['audioUrl']),
+      audioUrl: audioUrl,
+      playbackUrl: _playbackUrl(json, audioUrl, resolveUrl),
       transcriptionStatus:
           transcriptionStatusFromString(json['transcriptionStatus']),
       durationSec: _optionalInt(json['durationSec']),
@@ -236,6 +268,7 @@ class EpisodeDetail extends EpisodeSummary {
         description: description,
         publishedAt: publishedAt,
         audioUrl: audioUrl,
+        playbackUrl: playbackUrl,
         transcriptionStatus: status,
         durationSec: durationSec,
         imageUrl: imageUrl,
@@ -253,12 +286,13 @@ class EpisodeDetailEnvelope {
   final EpisodeDetail episode;
   final TranscriptionStatus transcriptionStatus;
 
-  factory EpisodeDetailEnvelope.fromJson(Map<String, dynamic> json) {
+  factory EpisodeDetailEnvelope.fromJson(Map<String, dynamic> json,
+      {UrlResolver resolveUrl = _keep}) {
     final episode = _map(json['episode']);
     if (episode == null || _string(episode['id']).isEmpty) {
       throw const FormatException('Episode response has no episode.');
     }
-    final detail = EpisodeDetail.fromJson(episode);
+    final detail = EpisodeDetail.fromJson(episode, resolveUrl: resolveUrl);
     return EpisodeDetailEnvelope(
       episode: detail,
       transcriptionStatus: json.containsKey('transcriptionStatus')
@@ -278,7 +312,8 @@ class Citation {
     required this.text,
     required this.score,
     this.kind = CitationKind.segment,
-  });
+    double? playFromSec,
+  }) : playFromSec = playFromSec ?? startSec;
 
   /// Transcript segment id, or `chapter:<id>` for a chapter citation.
   final String segmentId;
@@ -287,6 +322,10 @@ class Citation {
   final String episodeTitle;
   final double startSec;
   final double endSec;
+
+  /// Estimated start of the cited sentence, a little early: where "Listen
+  /// from" plays. Falls back to [startSec] when the server omits it.
+  final double playFromSec;
   final String text;
   final double score;
 
@@ -304,10 +343,23 @@ class Citation {
       episodeTitle: _string(json['episodeTitle']),
       startSec: _double(json['startSec']),
       endSec: _double(json['endSec']),
+      playFromSec: _optionalDouble(json['playFromSec']),
       text: _string(json['text']),
       score: _double(json['score']),
     );
   }
+
+  Map<String, Object> toJson() => {
+        'segmentId': segmentId,
+        'kind': kind.name,
+        'episodeId': episodeId,
+        'episodeTitle': episodeTitle,
+        'startSec': startSec,
+        'endSec': endSec,
+        'playFromSec': playFromSec,
+        'text': text,
+        'score': score,
+      };
 }
 
 /// One earlier exchange, sent as `history` with follow-up questions.
@@ -341,6 +393,71 @@ class QaResponse {
       refusalReason: _optionalString(json['refusalReason']),
     );
   }
+
+  Map<String, Object> toJson() => {
+        'answerText': answerText,
+        'citations': [for (final citation in citations) citation.toJson()],
+        'grounded': grounded,
+        if (refusalReason != null) 'refusalReason': refusalReason!,
+      };
+}
+
+enum AnswerStage { searching, answering }
+
+/// One event of `POST /v1/qa/answer/stream`.
+sealed class QaStreamEvent {
+  const QaStreamEvent();
+
+  /// Returns null for events this app does not know, so newer servers can
+  /// add event types.
+  static QaStreamEvent? tryParse(Map<String, dynamic> json) {
+    switch (json['type']) {
+      case 'status':
+        return switch (json['stage']) {
+          'searching' => const QaStatusEvent(AnswerStage.searching),
+          'answering' => const QaStatusEvent(AnswerStage.answering),
+          _ => null,
+        };
+      case 'delta':
+        final text = json['text'];
+        return text is String ? QaDeltaEvent(text) : null;
+      case 'done':
+        final response = _map(json['response']);
+        return response == null
+            ? null
+            : QaDoneEvent(QaResponse.fromJson(response));
+      case 'error':
+        return QaErrorEvent(_optionalString(json['error']),
+            requestId: _optionalString(json['requestId']));
+    }
+    return null;
+  }
+}
+
+/// The server moved to another [stage] of answering.
+class QaStatusEvent extends QaStreamEvent {
+  const QaStatusEvent(this.stage);
+  final AnswerStage stage;
+}
+
+/// More of the answer text, as it is written.
+class QaDeltaEvent extends QaStreamEvent {
+  const QaDeltaEvent(this.text);
+  final String text;
+}
+
+/// The final, authoritative answer. It replaces the streamed text and may be
+/// a refusal even after deltas were sent.
+class QaDoneEvent extends QaStreamEvent {
+  const QaDoneEvent(this.response);
+  final QaResponse response;
+}
+
+/// Answering failed after the stream started.
+class QaErrorEvent extends QaStreamEvent {
+  const QaErrorEvent(this.error, {this.requestId});
+  final String? error;
+  final String? requestId;
 }
 
 class EpisodePage {
@@ -349,9 +466,11 @@ class EpisodePage {
   final List<EpisodeSummary> items;
   final String? nextCursor;
 
-  factory EpisodePage.fromJson(Map<String, dynamic> json) {
+  factory EpisodePage.fromJson(Map<String, dynamic> json,
+      {UrlResolver resolveUrl = _keep}) {
     return EpisodePage(
-      items: _list(json['items'], EpisodeSummary.tryParse),
+      items: _list(json['items'],
+          (item) => EpisodeSummary.tryParse(item, resolveUrl: resolveUrl)),
       nextCursor: _optionalString(json['nextCursor']),
     );
   }
@@ -364,9 +483,12 @@ class TranscribeEpisodeResult {
   final String? jobId;
   final EpisodeSummary episode;
 
-  factory TranscribeEpisodeResult.fromJson(Map<String, dynamic> json) {
+  factory TranscribeEpisodeResult.fromJson(Map<String, dynamic> json,
+      {UrlResolver resolveUrl = _keep}) {
     final episode = _map(json['episode']);
-    final summary = episode == null ? null : EpisodeSummary.tryParse(episode);
+    final summary = episode == null
+        ? null
+        : EpisodeSummary.tryParse(episode, resolveUrl: resolveUrl);
     if (summary == null) {
       throw const FormatException('Transcribe response has no episode.');
     }
@@ -401,6 +523,8 @@ class SourceSummary {
     this.episodeCount = 0,
     this.readyEpisodeCount = 0,
     this.lastJob,
+    this.autoTranscribe = false,
+    this.lastRefreshedAt,
   });
 
   final String id;
@@ -413,6 +537,13 @@ class SourceSummary {
 
   /// The latest import job; null when none has run.
   final IngestJob? lastJob;
+
+  /// New episodes found by the periodic feed refresh are transcribed
+  /// automatically, within the daily limit.
+  final bool autoTranscribe;
+
+  /// When the feed was last read; null before the first import finishes.
+  final DateTime? lastRefreshedAt;
 
   static SourceSummary? tryParse(Map<String, dynamic> json) =>
       _string(json['id']).isEmpty ? null : SourceSummary.fromJson(json);
@@ -429,8 +560,23 @@ class SourceSummary {
       episodeCount: _optionalInt(json['episodeCount']) ?? 0,
       readyEpisodeCount: _optionalInt(json['readyEpisodeCount']) ?? 0,
       lastJob: job == null ? null : IngestJob.fromJson(job),
+      autoTranscribe: json['autoTranscribe'] == true,
+      lastRefreshedAt: _optionalDate(json['lastRefreshedAt']),
     );
   }
+
+  SourceSummary copyWith({bool? autoTranscribe}) => SourceSummary(
+        id: id,
+        name: name,
+        rssUrl: rssUrl,
+        imageUrl: imageUrl,
+        createdAt: createdAt,
+        episodeCount: episodeCount,
+        readyEpisodeCount: readyEpisodeCount,
+        lastJob: lastJob,
+        autoTranscribe: autoTranscribe ?? this.autoTranscribe,
+        lastRefreshedAt: lastRefreshedAt,
+      );
 }
 
 class PodcastSearchResult {
@@ -493,6 +639,91 @@ class SynthesizedAudio {
     return SynthesizedAudio(
       audioBase64: _string(json['audioBase64']),
       mimeType: _optionalString(json['mimeType']) ?? 'audio/mpeg',
+    );
+  }
+}
+
+/// Today's transcription allowance, shared by everyone on the server.
+class TranscriptionUsage {
+  TranscriptionUsage({
+    required this.date,
+    required this.usedMinutes,
+    required this.limitMinutes,
+    required this.remainingMinutes,
+  });
+
+  /// UTC day the limit applies to, `YYYY-MM-DD`.
+  final String date;
+  final double usedMinutes;
+  final double limitMinutes;
+  final double remainingMinutes;
+
+  bool get isUsedUp => remainingMinutes <= 0;
+
+  factory TranscriptionUsage.fromJson(Map<String, dynamic> json) {
+    final limit = _optionalDouble(json['limitMinutes']) ?? 0;
+    final used = _optionalDouble(json['usedMinutes']) ?? 0;
+    final remaining = _optionalDouble(json['remainingMinutes']) ?? limit - used;
+    return TranscriptionUsage(
+      date: _string(json['date']),
+      usedMinutes: used < 0 ? 0 : used,
+      limitMinutes: limit < 0 ? 0 : limit,
+      remainingMinutes: remaining < 0 ? 0 : remaining,
+    );
+  }
+}
+
+class User {
+  const User({
+    required this.id,
+    required this.email,
+    required this.name,
+    this.role = 'user',
+  });
+
+  final String id;
+  final String email;
+  final String name;
+
+  /// `user` or `admin`.
+  final String role;
+
+  /// Returns null when [json] has no user id.
+  static User? tryParse(Map<String, dynamic> json) {
+    final id = _optionalString(json['id']);
+    if (id == null) return null;
+    return User(
+      id: id,
+      email: _string(json['email']),
+      name: _string(json['name']),
+      role: _optionalString(json['role']) ?? 'user',
+    );
+  }
+
+  Map<String, String> toJson() =>
+      {'id': id, 'email': email, 'name': name, 'role': role};
+}
+
+/// A signed-in session from `POST /v1/auth/login`.
+class LoginResult {
+  LoginResult({required this.token, required this.user, this.expiresAt});
+
+  /// Sent as `Authorization: Bearer <token>`.
+  final String token;
+  final User user;
+  final DateTime? expiresAt;
+
+  factory LoginResult.fromJson(Map<String, dynamic> json) {
+    final token = _optionalString(json['token']);
+    final user = _map(json['user']);
+    final parsed = user == null ? null : User.tryParse(user);
+    if (token == null || parsed == null) {
+      throw const FormatException('Login response has no token or user.');
+    }
+    return LoginResult(
+      token: token,
+      user: parsed,
+      expiresAt: _optionalDate(json['expiresAt']),
     );
   }
 }

@@ -72,7 +72,7 @@ void main() {
       final controller = makeController(audio: audio);
       await controller.selectEpisode('ep1');
       await controller.playCitation(citationAt(95));
-      expect(audio.lastEpisodeUrl, 'https://example.com/ep1.mp3');
+      expect(audio.lastEpisodeUrl, 'https://media.example/ep1.mp3');
       expect(audio.lastSeek, const Duration(seconds: 95));
     });
 
@@ -213,7 +213,7 @@ void main() {
       final controller = makeController(audio: audio);
       await controller.selectEpisode('ep2');
       await controller.playCitation(citationAt(12.45));
-      expect(audio.lastEpisodeUrl, 'https://example.com/ep1.mp3');
+      expect(audio.lastEpisodeUrl, 'https://media.example/ep1.mp3');
       expect(audio.lastSeek, const Duration(milliseconds: 12450));
       expect(controller.selectedEpisode!.episode.id, 'ep2');
       expect(controller.nowPlaying?.id, 'ep1');
@@ -405,7 +405,7 @@ void main() {
       final controller = makeController(audio: audio);
       await controller.selectEpisode('ep1');
       await controller.playSelectedEpisode();
-      expect(audio.lastEpisodeUrl, 'https://example.com/ep1.mp3');
+      expect(audio.lastEpisodeUrl, 'https://media.example/ep1.mp3');
       expect(audio.lastSeek, Duration.zero);
       expect(controller.isPlayingEpisode, true);
       expect(controller.playerStatus, PlayerStatus.playing);
@@ -631,7 +631,7 @@ void main() {
       await controller.toggleNowPlaying();
       expect(controller.playerStatus, PlayerStatus.paused);
       await controller.toggleNowPlaying();
-      expect(audio.lastEpisodeUrl, 'https://example.com/ep2.mp3');
+      expect(audio.lastEpisodeUrl, 'https://media.example/ep2.mp3');
       expect(audio.lastSeek, const Duration(seconds: 75));
     });
   });
@@ -663,7 +663,7 @@ void main() {
       audio.ttsGate!.complete();
       await answer;
       expect(controller.playerStatus, PlayerStatus.playing);
-      expect(audio.events.last, 'play https://example.com/ep1.mp3@754500');
+      expect(audio.events.last, 'play https://media.example/ep1.mp3@754500');
       expect(controller.questionPosition, isNotNull);
     });
 
@@ -904,7 +904,7 @@ void main() {
           reason: 'playback still pauses and resumes around the question');
 
       await controller.playCitation(controller.latestResponse!.citations.single);
-      expect(audio.lastEpisodeUrl, 'https://example.com/ep2.mp3');
+      expect(audio.lastEpisodeUrl, 'https://media.example/ep2.mp3');
       expect(controller.selectedEpisode!.episode.id, 'pending');
     });
 

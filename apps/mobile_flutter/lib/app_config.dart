@@ -2,10 +2,6 @@ import 'package:flutter/foundation.dart';
 
 const String configuredApiBaseUrl = String.fromEnvironment('API_BASE_URL');
 const String _configuredApiKey = String.fromEnvironment('API_KEY');
-const bool _hasConfiguredApiKey = bool.hasEnvironment('API_KEY');
-
-/// Key that matches the API's example environment (`apps/api/.env.example`).
-const String developmentApiKey = 'dev-app-key';
 
 String get apiBaseUrl => configuredApiBaseUrl.isNotEmpty
     ? configuredApiBaseUrl
@@ -13,19 +9,9 @@ String get apiBaseUrl => configuredApiBaseUrl.isNotEmpty
         ? 'http://10.0.2.2:4000'
         : 'http://localhost:4000';
 
-/// The app key from `--dart-define=API_KEY=...`. Without it, debug builds use
-/// [developmentApiKey] and other builds send no key.
-String get apiKey => resolveApiKey(
-      isDefined: _hasConfiguredApiKey,
-      configured: _configuredApiKey,
-      debug: kDebugMode,
-    );
+/// A service token from `--dart-define=API_KEY=...` (the server's
+/// `APP_API_KEY`). With it the app skips signing in; without it, every build
+/// (debug included) shows the sign-in screen.
+String get serviceApiKey => resolveServiceApiKey(_configuredApiKey);
 
-String resolveApiKey({
-  required bool isDefined,
-  required String configured,
-  required bool debug,
-}) {
-  if (isDefined) return configured;
-  return debug ? developmentApiKey : '';
-}
+String resolveServiceApiKey(String configured) => configured.trim();

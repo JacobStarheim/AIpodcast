@@ -1,7 +1,7 @@
 import request from "supertest";
 import { describe, expect, it } from "vitest";
 import { createApp } from "../src/app.js";
-import { RateLimiter } from "../src/security.js";
+import { MemoryRateLimitStore, RateLimiter } from "../src/rate-limit.js";
 import {
   APP_KEY,
   AUTH,
@@ -87,7 +87,7 @@ describe("API contracts", () => {
     expect(ttsResponse.body.mimeType).toBe("audio/wav");
   });
 
-  it("requires the app key on every v1 route except health", async () => {
+  it("requires a session or the service key on every v1 route except health", async () => {
     const { app } = setup();
     expect((await request(app).get("/health")).status).toBe(200);
     for (const [method, path] of [
@@ -121,7 +121,7 @@ describe("API contracts", () => {
     const aiClient = new FakeAIClient();
     aiClient.answerGrounded = async () => ({
       answerText: "This claim has no supporting chunk.",
-      citationIndices: [99]
+      citations: [{ index: 99, quote: "" }]
     });
     const { app } = setup({ aiClient });
     const response = await request(app).post("/v1/qa/answer").set(AUTH).send({
@@ -229,7 +229,7 @@ describe("API contracts", () => {
 
   it("limits request rates per client with Retry-After", async () => {
     let now = 0;
-    const { app } = setup({ rateLimiter: new RateLimiter(() => now) });
+    const { app } = setup({ rateLimiter: new RateLimiter(new MemoryRateLimitStore(() => now), () => now) });
     for (let index = 0; index < 20; index += 1) {
       expect((await request(app).post("/v1/voice/synthesize").set(AUTH).send({ text: "hi" })).status).toBe(200);
     }

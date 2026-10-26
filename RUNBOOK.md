@@ -15,10 +15,19 @@ npm run db:up
 
 Create missing environment files from `apps/api/.env.example` and
 `apps/worker/.env.example`, then configure the OpenAI key in both. The API also
-requires `ADMIN_KEY` and `APP_API_KEY`. Secrets belong only in backend
-environment files, not the mobile app; the app key is a shared prototype key,
-not a user account. The default model names are `gpt-transcribe`, `gpt-6-luna`,
-`gpt-realtime-2.1-mini`, and `text-embedding-3-small`.
+requires `ADMIN_KEY`. Secrets belong only in backend environment files, not the
+mobile app. The default model names are `gpt-transcribe`, `gpt-6-luna`,
+`gpt-5.4-mini` (question rewriting), `gpt-realtime-2.1-mini`, and
+`text-embedding-3-small`.
+
+People sign in with their own accounts. Create one with
+`USER_PASSWORD=... npm run user:create -- --email <email> --name <name>`
+(`--admin` for an administrator), or with `POST /v1/admin/users`. Sessions last
+30 days. `APP_API_KEY` is an optional service token for the scripts; leave it
+empty when others can reach the API.
+
+API and worker must share `AUDIO_STORAGE_DIR`: the worker keeps each transcribed
+file there and the API serves it to the app.
 
 Check the worker's audio tools:
 
@@ -86,6 +95,9 @@ SELECT version, applied_at FROM schema_migrations ORDER BY version;
 SELECT COUNT(*) FROM rss_sources;
 SELECT transcription_status, COUNT(*) FROM episodes GROUP BY transcription_status;
 SELECT COUNT(*) FROM transcript_segments WHERE embedding IS NOT NULL;
+SELECT day, ROUND(seconds / 60) AS minutes FROM transcription_usage ORDER BY day DESC LIMIT 7;
+SELECT name, auto_transcribe, last_refreshed_at FROM rss_sources;
+SELECT email, role, created_at FROM users;
 SELECT id, source_id, episode_id, status, error, heartbeat_at, updated_at
 FROM ingest_jobs ORDER BY created_at DESC LIMIT 5;
 SELECT e.id, e.title, e.transcription_status, e.transcription_attempts,
@@ -101,9 +113,8 @@ ORDER BY e.updated_at DESC LIMIT 10;
 
 Keep the API, worker, and demo server running. Android defaults to
 `http://10.0.2.2:4000`; the iOS simulator defaults to `http://localhost:4000`.
-Debug builds send the app key `dev-app-key`; pass
-`--dart-define=API_KEY=...` if the API uses another key. The demo's audio URL is
-loopback, so Android needs:
+Sign in with an account created as above. The demo's audio URL is loopback, so
+Android needs:
 
 ```bash
 adb reverse tcp:4100 tcp:4100
@@ -116,25 +127,33 @@ Flutter define.
 Run `flutter devices`, then `flutter run -d <device-id>` from
 `apps/mobile_flutter`. Verify on each target:
 
-1. Open the Aurora demo episode and confirm `Ready`.
-2. Type “How many sensors does Aurora carry?” and check that the answer says 24
-   with a playable citation.
-3. Tap the citation and confirm that the original episode plays near the passage
-   containing the answer.
-4. Pause, seek with the progress bar, leave the episode and come back; playback
+1. Sign in, open the account button and confirm the name; the library shows the
+   transcription minutes left today.
+2. Open the Aurora demo episode and confirm `Ready`.
+3. Type “How many sensors does Aurora carry?” and check that the answer appears
+   while it is written, says 24, and has a playable citation.
+4. Tap the citation and confirm that the episode plays just before the quoted
+   words.
+5. Pause, seek with the progress bar, leave the episode and come back; playback
    resumes where it stopped.
-5. While the episode plays, ask “What did they just say?”; playback pauses, the
+6. Start playback, lock the phone (or go to the home screen) and check that it
+   keeps playing and can be paused from the lock screen.
+7. While the episode plays, ask “What did they just say?”; playback pauses, the
    answer uses the passage just heard, and playback resumes.
-6. Ask a follow-up (“And where does it leave from?”) and confirm it is understood.
-7. Allow microphone access, record a question, and confirm transcription and an
+8. Ask a follow-up (“And where does it leave from?”) and confirm it is understood.
+   Close and reopen the app; the conversation is still there.
+9. Allow microphone access, record a question, and confirm transcription and an
    answer.
-8. Enable spoken answers, verify playback, and use the stop control.
-9. Ask for a fact absent from the episode and verify refusal.
-10. Search for a podcast, add it, and transcribe one episode.
+10. Enable spoken answers, verify playback, and use the stop control.
+11. Ask for a fact absent from the episode, in Norwegian, and verify a Norwegian
+    refusal.
+12. Search for a podcast, add it, turn on automatic transcription in its
+    settings, and transcribe one episode.
 
-Citation precision is one audio clip, 10–30 seconds. The model does not return
-word timestamps; the worker uses the real boundaries of the clips it transcribes.
-Synthesis returns WAV audio from the Realtime model.
+Passage times are the boundaries of one audio clip, 10–30 seconds. The answer
+model quotes the words it relies on, and **Listen from** starts about 1.5 seconds
+before where that quote falls in the clip, estimated from its position in the
+text. Synthesis returns WAV audio from the Realtime model.
 
 ## Failure diagnosis and recovery
 
@@ -216,9 +235,36 @@ stored embeddings consistently.
 
 ### The app shows "Too many requests"
 
-The API limits requests per client address (see [docs/api.md](docs/api.md)).
-Wait for the time in the message. Behind a reverse proxy, set `TRUST_PROXY` so
+The API limits requests per signed-in user, and sign-in attempts per client
+address (see [docs/api.md](docs/api.md)). The counters are in the `rate_limits`
+table, so every API process shares them. Wait for the time in the message.
+Behind a reverse proxy, set `TRUST_PROXY` so sign-in attempts from different
 clients are told apart.
+
+### Transcription is refused with "Today's transcription limit is used up"
+
+`DAILY_TRANSCRIPTION_MINUTES` (default 180) caps the audio transcribed per UTC
+day, for requests and automatic transcription together; see
+`transcription_usage`. A requested episode that does not fit is refused right
+away (or fails without using up an attempt if the limit runs out while it waits);
+automatic ones wait for the next day. Raise the limit in both the API and
+worker environment, or set it to 0 to turn it off, and restart them.
+
+### Someone cannot sign in, or should no longer have access
+
+Wrong passwords and unknown addresses get the same answer. There is no password
+reset: delete the account (`DELETE FROM users WHERE lower(email) =
+lower('<email>');`, which also ends its sessions) and create it again. To remove
+access but keep the account, run
+`UPDATE users SET disabled = TRUE WHERE lower(email) = lower('<email>');`; its
+sessions stop working at once.
+
+### An episode plays but **Listen from** lands at the wrong place
+
+Check that the episode has `audio_file` set and that the file exists in
+`AUDIO_STORAGE_DIR`. Episodes transcribed before the audio was kept fall back
+to the publisher's file, whose ads may differ from the transcribed copy. Queue a
+new transcription with `POST /v1/admin/episodes/<id>/retranscribe`.
 
 ### Text answers work but spoken answers fail
 
@@ -230,13 +276,17 @@ test. Text answers remain available when speech generation or playback fails.
 
 ### The app cannot reach the API or play citations
 
-- Use the correct emulator/simulator API address and app key (401 means a wrong key).
+- Use the correct emulator/simulator API address. A 401 means the session ended
+  or the account was disabled; the app returns to the sign-in screen.
 - Reapply Android port forwarding after reconnecting or restarting the emulator.
-- Keep the demo server on port 4100 running; API availability alone does not make
-  episode audio available.
+- Episodes transcribed before the audio was kept still play from the publisher
+  (for the demo, the demo server on port 4100). Transcribed episodes play from
+  the API through signed links that expire after 12 hours; the app fetches a new
+  link when one fails.
 - A physical device needs URLs reachable from that device. The bundled loopback
   demo needs different serving/network configuration for physical hardware.
-- Android debug/profile builds permit local HTTP; a release setup needs HTTPS.
+- Android debug/profile builds permit local HTTP; a release setup needs HTTPS
+  (see [docs/deploy.md](docs/deploy.md)).
 
 ## Checks before handing off a build
 

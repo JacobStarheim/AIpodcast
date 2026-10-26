@@ -12,11 +12,15 @@ import { repositoryRoot } from "../demo-fixture.mjs";
 //   question      text to ask
 //   kind          fact | translated | followup | overview | heard | unanswerable
 //   history       earlier turns for follow-ups
-//   positionSec   playback position for "what did they just say" questions
+//   positionSec   playback position for "what did they just say" questions, or
+//   positionAfter a phrase; the position becomes the end of the passage saying it
 //   scope         "episode" (default) or "library"
 //   keywords      groups of alternatives; every group must appear in the answer
-//   windows       [[startSec, endSec], ...] where the answer is said; a
-//                 passage citation overlapping any of them counts as a hit
+//   evidence      phrases that say the answer (any of them); the passages
+//                 containing them in the current transcript are the windows a
+//                 citation must overlap. Phrases survive re-transcription and
+//                 ads that shift times, unlike fixed windows.
+//   windows       [[startSec, endSec], ...] fixed alternative to evidence
 //   refuse        true when the episode does not contain the answer
 
 const { values: args } = parseArgs({
@@ -37,15 +41,42 @@ const dataset = JSON.parse(await readFile(args.dataset, "utf8"));
 const only = args.only ? new Set(args.only.split(",")) : null;
 
 const pool = new pg.Pool({ connectionString: env.DATABASE_URL, max: 1 });
+// Read-only lookups: the episode and its transcript for evidence phrases.
 const episodeRow = (await pool.query(
   `SELECT e.id, e.transcription_status FROM episodes e JOIN rss_sources s ON s.id = e.source_id
    WHERE e.guid = $1 AND s.rss_url = $2`,
   [dataset.episode.guid, dataset.episode.rssUrl]
 )).rows[0];
+const transcript = episodeRow
+  ? (await pool.query(
+      "SELECT start_sec, end_sec, text FROM transcript_segments WHERE episode_id = $1 ORDER BY start_sec",
+      [episodeRow.id]
+    )).rows.map((row) => ({ startSec: Number(row.start_sec), endSec: Number(row.end_sec), text: matchable(row.text) }))
+  : [];
 await pool.end();
 if (!episodeRow) throw new Error(`Episode ${dataset.episode.guid} is not in the library. Add the feed first.`);
 if (episodeRow.transcription_status !== "ready") {
   throw new Error(`Episode is ${episodeRow.transcription_status}; transcribe it before running the eval.`);
+}
+
+function matchable(text) {
+  return text.toLocaleLowerCase().normalize("NFKC").replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim();
+}
+
+/** Windows of the passages (or adjacent pairs) containing any of the phrases. */
+function evidenceWindows(phrases) {
+  const windows = [];
+  for (const phrase of phrases.map(matchable)) {
+    transcript.forEach((segment, index) => {
+      const next = transcript[index + 1];
+      if (segment.text.includes(phrase)) {
+        windows.push([segment.startSec, segment.endSec]);
+      } else if (next && !next.text.includes(phrase) && `${segment.text} ${next.text}`.includes(phrase)) {
+        windows.push([segment.startSec, next.endSec]);
+      }
+    });
+  }
+  return windows;
 }
 
 function normalize(text) {
@@ -57,12 +88,17 @@ function overlaps([start, end], citation) {
 }
 
 async function ask(testCase) {
+  let positionSec = testCase.positionSec;
+  if (testCase.positionAfter) {
+    positionSec = evidenceWindows([testCase.positionAfter])[0]?.[1];
+    if (positionSec === undefined) throw new Error(`positionAfter phrase not found: ${testCase.positionAfter}`);
+  }
   const body = {
     questionText: testCase.question,
     history: testCase.history ?? [],
     ...(args["top-k"] ? { topK: Number(args["top-k"]) } : {}),
     ...(testCase.scope === "library" ? {} : { episodeId: episodeRow.id }),
-    ...(testCase.positionSec !== undefined ? { positionSec: testCase.positionSec } : {})
+    ...(positionSec !== undefined ? { positionSec } : {})
   };
   const startedAt = Date.now();
   const response = await fetch(`${apiOrigin}/v1/qa/answer`, {
@@ -98,7 +134,14 @@ function score(testCase, result) {
   };
 }
 
-const cases = dataset.cases.filter((testCase) => !only || only.has(testCase.id));
+const cases = dataset.cases
+  .filter((testCase) => !only || only.has(testCase.id))
+  .map((testCase) => {
+    if (!testCase.evidence) return testCase;
+    const windows = evidenceWindows(testCase.evidence);
+    if (windows.length === 0) throw new Error(`${testCase.id}: evidence not found in the transcript: ${testCase.evidence.join(" | ")}`);
+    return { ...testCase, windows };
+  });
 const results = [];
 for (const testCase of cases) {
   try {
