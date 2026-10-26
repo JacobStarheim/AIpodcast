@@ -131,6 +131,15 @@ describe.runIf(databaseUrl)("PostgresRepository against PostgreSQL", () => {
     expect(chapters[0]?.segmentId).toMatch(/^chapter:/);
   });
 
+  it("adds the passages around each hit, once, in order", async () => {
+    const hits = await repository.searchSegments({ embedding: JSON.parse(vector(2)), episodeId: readyId, topK: 1 });
+    expect(hits.map((hit) => hit.startSec)).toEqual([20]);
+    const expanded = await repository.withNeighbours([...hits, { ...hits[0]!, segmentId: "dup" }]);
+    expect(expanded.map((segment) => segment.startSec)).toEqual([0, 20, 40]);
+    expect(expanded.find((segment) => segment.startSec === 20)?.score).toBeCloseTo(1, 5);
+    expect(expanded.find((segment) => segment.startSec === 0)?.score).toBe(0);
+  });
+
   it("adds a feed once, queues one import, and reports it", async () => {
     const first = await repository.addSource({ name: "", rssUrl: "https://feeds.test/new", imageUrl: null });
     expect(first.created).toBe(true);

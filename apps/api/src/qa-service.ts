@@ -150,10 +150,12 @@ export async function answerQuestion(deps: QaDependencies, input: QaInput): Prom
     return refuse("insufficient_retrieval_confidence");
   }
 
+  // Passages are embedded together with their neighbours, so a hit often
+  // means "the answer is here or right next to it". Give the model both.
   const heardIds = new Set(recentlyHeard.map((segment) => segment.segmentId));
   const evidence: Evidence[] = [
     ...recentlyHeard,
-    ...retrieved.filter((segment) => !heardIds.has(segment.segmentId)),
+    ...(await repository.withNeighbours(retrieved)).filter((segment) => !heardIds.has(segment.segmentId)),
     ...chapters.slice(0, 24)
   ];
 

@@ -99,7 +99,8 @@ Body `QARequest`:
 - `history`: earlier turns, oldest first. Used to understand follow-up
   questions; only the last 6 turns are used and each text is truncated to
   1000 characters.
-- `topK`: 1–12, default 6.
+- `topK`: 1–12, default 10. Each hit also brings the passages directly before
+  and after it.
 
 Returns `QAResponse`. Citations have `kind: "segment"` (a transcript passage)
 or `kind: "chapter"` (a chapter from the episode summary). Both carry

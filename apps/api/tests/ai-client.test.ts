@@ -104,6 +104,14 @@ describe("OpenAI adapter contracts", () => {
     expect(body.input[1].content).toContain("Episode overview:\nA prototype review.");
   });
 
+  it("removes chunk numbers the model puts in the answer text", async () => {
+    const { client } = mockClient(
+      responsePayload(JSON.stringify({ answerText: "Five listeners [0]. Then more [0, 1].", citationIndices: [0] }))
+    );
+    const answer = await client.answerGrounded({ questionText: "Q", evidence: [segment], history: [], episodeSummary: null });
+    expect(answer.answerText).toBe("Five listeners. Then more.");
+  });
+
   it.each([
     "{}",
     "null",

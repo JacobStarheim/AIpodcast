@@ -19,6 +19,7 @@
     "db:down": "cd infrastructure && docker compose down",
     "demo:serve": "node scripts/demo-server.mjs",
     "test:live": "node scripts/smoke-live.mjs",
+    "eval": "node scripts/eval/run-eval.mjs",
     "seed": "./scripts/seed.sh"
   },
   "engines": {

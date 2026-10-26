@@ -66,6 +66,8 @@ export interface Repository {
     toSec: number;
     limit: number;
   }): Promise<RetrievedSegment[]>;
+  /** The given passages and the passages directly before and after each, in time order per hit. */
+  withNeighbours(hits: RetrievedSegment[]): Promise<RetrievedSegment[]>;
   searchChapters(input: { embedding: number[]; topK: number }): Promise<RetrievedSegment[]>;
   logQaEvent(input: {
     episodeId?: string;

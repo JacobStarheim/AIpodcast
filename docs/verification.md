@@ -82,6 +82,54 @@ clearly similar is answered without it. Measured end to end through the API:
 Before this change the same pipeline took 3.5–7 seconds per question; the
 previous revision, without rewriting, took about 2 seconds.
 
+## Answer quality on a real episode
+
+The Hard Fork episode "Why No One Can Look Away From Elizabeth Holmes"
+(67 minutes, English) was transcribed through the normal app flow
+(`POST /v1/episodes/:id/transcribe`).
+
+- Download, segmentation, transcription of 199 clips (12–30 s, average
+  20.3 s), embeddings, summary and ten chapters took 1 minute 48 seconds.
+- The transcript reads well: no words were cut at clip boundaries. Names are
+  the weak spot. Erin Griffith appears as "Aaron Griffith" in three passages,
+  John Carreyrou once as "John Carew", Deborah Kamin as "Deborah Camen". The
+  summary consequently calls "Aaron Griffith" a host.
+
+`scripts/eval/datasets/hard-fork-holmes.json` holds 29 questions with answers
+and times taken from the transcript: 12 factual, 4 in Norwegian, 3 follow-ups
+(one in Norwegian), 3 overview, 2 asked at a playback position, 3 that the
+episode cannot answer, and 2 across the whole library.
+
+| Configuration | Passed | Correct answers | Citation in the right place | Wrong refusals | Median / p90 latency |
+| --- | --- | --- | --- | --- | --- |
+| As merged (6 passages, no neighbours) | 23/29 | 21/26 | 16/22 | 4 | 3.9 s / 4.9 s |
+| + neighbouring passages, planner and timeout fixes | 27–28/29 (3 runs) | 24–25/26 | 20–21/22 | 1–2 | 3.2–3.4 s / 4.4–4.7 s |
+| + 10 passages instead of 6 (new default) | 29/29 (3 runs) | 26/26 | 22/22 | 0 | 3.3 s / 4.0–4.6 s |
+
+All three unanswerable questions were refused in every run. One case was a
+dataset error (its window was too narrow) and was corrected after the first
+run; the first row counts it as failed.
+
+What the failures showed:
+
+- Similarity scores across a one-hour conversation are flat (about 0.5–0.6),
+  so with six passages the right one was often just outside the cut-off.
+- Passages are embedded with their neighbours' text, but the answer model
+  only saw the passage itself. The search could find the right spot while the
+  model never saw the sentence (for example "selling some of its assets to
+  Walt Disney"). The neighbours are now passed as separate citable passages.
+- The question planner sometimes added names that were not in the question
+  ("The Inventor"); it is now told not to.
+- The answer model once wrote a chunk number ("[3]") into the answer; such
+  markers are removed and the model is told not to write them.
+- One question took 104 seconds, most likely a stalled model request retried
+  under the old 60-second timeout. Interactive calls now time out after 25
+  seconds with one retry.
+
+The results describe one English talk show and questions written from its
+transcript. They do not establish quality for other languages, music-heavy
+episodes, or questions phrased very differently.
+
 ## Mobile app
 
 The app was built for and run on an **iPhone 17 simulator (iOS 26.5)** against
@@ -105,9 +153,8 @@ application ID changed to `io.github.jacobstarheim.aipodcast`.
 
 ## Remaining limits
 
-- No real podcast episode has been transcribed in this revision; that costs
-  transcription time per audio minute and was left for the owner to start.
-  Segmentation and download were verified on a real episode as described above.
+- One real episode has been transcribed and evaluated (see above); other
+  podcasts, languages and audio styles have not.
 - No physical iOS or Android devices have been verified.
 - The demo fixture is short and controlled; the checks do not establish
   transcription quality across arbitrary podcast feeds, languages, or recordings.

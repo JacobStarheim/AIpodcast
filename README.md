@@ -224,6 +224,13 @@ nothing), and runs the database suites (`*.db.test.ts`) against real
 PostgreSQL. `npm test` skips those suites. GitHub Actions runs all of the above
 on every push and pull request ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
 
+To measure answer quality on a real episode, transcribe it and run a question
+set with known answers (paid model calls):
+
+```bash
+npm run eval -- --dataset scripts/eval/datasets/hard-fork-holmes.json
+```
+
 See [docs/verification.md](docs/verification.md) for what has been verified and
 the limits of these checks.
 
