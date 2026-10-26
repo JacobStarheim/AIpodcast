@@ -1,0 +1,32 @@
+# Keep the build context small and free of secrets. Images are built from
+# source; dependencies are installed inside the build with `npm ci`.
+.git
+.github
+.claude
+.local
+tmp
+**/tmp
+node_modules
+**/node_modules
+**/dist
+**/coverage
+.npm-cache
+**/.DS_Store
+
+# Not part of the backend images
+apps/mobile_flutter
+docs
+**/*.md
+
+# Secrets and local configuration
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+
+# Deployment files themselves
+Dockerfile
+.dockerignore
+infrastructure/docker-compose*.yml
+infrastructure/Caddyfile
+infrastructure/.env*

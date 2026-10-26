@@ -1,0 +1,60 @@
+# Caddy: automatic HTTPS and reverse proxy in front of the API.
+#
+# DOMAIN comes from the env file (see .env.prod.example). For a public domain
+# Caddy obtains and renews a Let's Encrypt certificate by itself; the DNS A
+# record must point at this server and ports 80 and 443 must be reachable.
+# With DOMAIN=localhost it issues a certificate from its own local CA instead
+# (for testing only; clients must skip verification, e.g. `curl -k`).
+{
+	# Caddy runs in a container: there is no host trust store to install its
+	# local CA into. Only matters for DOMAIN=localhost.
+	skip_install_trust
+
+	servers {
+		timeouts {
+			read_header 30s
+			# Voice questions upload up to 25 MB, possibly over a slow phone link.
+			read_body 5m
+			# No write timeout: answer streams and episode audio stay open as long
+			# as the client keeps reading.
+			idle 5m
+		}
+	}
+}
+
+{$DOMAIN} {
+	# The API accepts at most 25 MB (audio uploads); reject larger bodies early.
+	request_body {
+		max_size 30MB
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		-Server
+	}
+
+	reverse_proxy api:4000 {
+		# Forward every chunk immediately: /v1/qa/answer/stream sends
+		# server-sent events that must not be buffered.
+		flush_interval -1
+
+		transport http {
+			dial_timeout 5s
+			# Answers and speech synthesis can take a while before the first byte.
+			response_header_timeout 3m
+			# Longest allowed pause while reading a response or sending a request body.
+			read_timeout 5m
+			write_timeout 5m
+			# Below Node's 5 s keep-alive timeout, so Caddy never reuses a
+			# connection the API is just closing (would surface as a 502).
+			keepalive 4s
+		}
+	}
+
+	# Access log to stdout (Docker rotates it). Authorization headers are redacted.
+	log {
+		output stdout
+		format json
+	}
+}
